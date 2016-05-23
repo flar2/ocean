@@ -2348,6 +2348,11 @@ static void qpnp_hap_td_enable(struct timed_output_dev *dev, int time_ms)
 
 		register_haptic(time_ms);
 
+		if (hap->vmax_mv == QPNP_HAP_VMAX_MIN_MV) {
+			spin_unlock(&hap->lock);
+			return;
+		}
+
 		hap->play_time_ms = time_ms;
 		hrtimer_start(&hap->hap_timer,
 				ktime_set(time_ms / 1000,
