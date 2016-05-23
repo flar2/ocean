@@ -1719,6 +1719,12 @@ static void qpnp_hap_td_enable(struct timed_output_dev *dev, int value)
 		VIB_INFO_LOG("en=%d\n", value);
 		value = (value > hap->timeout_ms ?
 				 hap->timeout_ms : value);
+
+		if (hap->vmax_mv == QPNP_HAP_VMAX_MIN_MV) {
+			spin_unlock(&hap->lock);
+			return;
+		}
+
 		hap->state = 1;
 		hrtimer_start(&hap->hap_timer,
 			      ktime_set(value / 1000, (value % 1000) * 1000000),
