@@ -30,4 +30,5 @@ obj-$(CONFIG_INPUT_KEYRESET)	+= keyreset.o
 obj-$(CONFIG_INPUT_KEYCOMBO)	+= keycombo.o
 obj-$(CONFIG_INPUT_KEYLED)	+= keyled.o
 obj-$(CONFIG_EDGE_XR15510) 		+= edge_xr15510/
+obj-$(CONFIG_HOMEBUTTON)	+= homebutton.o
 
