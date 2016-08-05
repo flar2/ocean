@@ -102,3 +102,4 @@ obj-$(CONFIG_TOUCHSCREEN_HIMAX_ES_CAP)  += himax_852xES_cap.o
 obj-$(CONFIG_TOUCHSCREEN_NT36xxx)       += nt36xxx/
 obj-$(CONFIG_TOUCHSCREEN_ST)		+= st/
 obj-$(CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_HTC) += synaptics_dsx_htc/
+obj-$(CONFIG_SWEEP2SLEEP)		+= sweep2sleep.o
