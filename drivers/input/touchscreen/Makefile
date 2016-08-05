@@ -102,3 +102,4 @@ obj-$(CONFIG_TOUCHSCREEN_ROHM_BU21023)	+= rohm_bu21023.o
 obj-$(CONFIG_TOUCHSCREEN_GT9XX)		+= gt9xx/
 obj-$(CONFIG_TOUCHSCREEN_HIMAX_ES_CAP)  += himax_852xES_cap.o
 #obj-$(CONFIG_TOUCHSCREEN_ST)		+= st/
+obj-$(CONFIG_SWEEP2SLEEP)		+= sweep2sleep.o
