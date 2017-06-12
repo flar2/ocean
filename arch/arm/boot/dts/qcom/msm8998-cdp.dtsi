@@ -10,8 +10,9 @@
  * GNU General Public License for more details.
  */
 
+#include "msm8998-pinctrl.dtsi"
 #include "msm8998-camera-sensor-cdp.dtsi"
-&vendor {
+/ {
 	bluetooth: bt_wcn3990 {
 		compatible = "qca,wcn3990";
 		qca,bt-vdd-io-supply = <&pm8998_s3>;
@@ -108,7 +109,7 @@
 		qcom,out-strength = <1>;
 	};
 
-	/* GPIO 6 for Vol+ Key */
+/*	GPIO 6 for Vol+ Key
 	gpio@c500 {
 		status = "okay";
 		qcom,mode = <0>;
@@ -117,7 +118,7 @@
 		qcom,src-sel = <0>;
 		qcom,out-strength = <1>;
 	};
-
+*/
 	/* GPIO 7 for Snapshot Key */
 	gpio@c600 {
 		status = "okay";
@@ -257,8 +258,6 @@
 	qcom,mdss-dsi-bl-max-level = <4095>;
 	qcom,mdss-dsi-mode-sel-gpio-state = "dual_port";
 	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
-	qcom,partial-update-enabled = "single_roi";
-	qcom,panel-roi-alignment = <720 128 720 128 1440 128>;
 };
 
 &dsi_dual_nt35597_truly_video {
@@ -514,10 +513,6 @@
 };
 
 &snd_9335 {
-	qcom,mbhc-audio-jack-type = "6-pole-jack";
-};
-
-&snd_934x {
 	qcom,mbhc-audio-jack-type = "6-pole-jack";
 };
 

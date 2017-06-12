@@ -18,29 +18,11 @@
 #ifndef __MSM_GEM_H__
 #define __MSM_GEM_H__
 
-#include <linux/kref.h>
 #include <linux/reservation.h>
 #include "msm_drv.h"
 
 /* Additional internal-use only BO flags: */
 #define MSM_BO_STOLEN        0x10000000    /* try to use stolen/splash memory */
-#define MSM_BO_LOCKED        0x20000000    /* Pages have been securely locked */
-
-struct msm_gem_address_space {
-	const char *name;
-	struct msm_mmu *mmu;
-	struct kref kref;
-	struct drm_mm mm;
-	u64 va_len;
-};
-
-struct msm_gem_vma {
-	/* Node used by the GPU address space, but not the SDE address space */
-	struct drm_mm_node node;
-	struct msm_gem_address_space *aspace;
-	uint64_t iova;
-	struct list_head list;
-};
 
 struct msm_gem_object {
 	struct drm_gem_object base;
@@ -70,7 +52,9 @@ struct msm_gem_object {
 	struct sg_table *sgt;
 	void *vaddr;
 
-	struct list_head domains;
+	struct {
+		dma_addr_t iova;
+	} domain[NUM_DOMAINS];
 
 	/* normally (resv == &_resv) except for imported bo's */
 	struct reservation_object *resv;
@@ -101,6 +85,8 @@ static inline uint32_t msm_gem_fence(struct msm_gem_object *msm_obj,
 	return fence;
 }
 
+#define MAX_CMDS 4
+
 /* Created per submit-ioctl, to track bo's and cmdstream bufs, etc,
  * associated with the cmdstream submission for synchronization (and
  * make it easier to unwind when things go wrong, etc).  This only
@@ -108,28 +94,24 @@ static inline uint32_t msm_gem_fence(struct msm_gem_object *msm_obj,
  */
 struct msm_gem_submit {
 	struct drm_device *dev;
-	struct msm_gem_address_space *aspace;
+	struct msm_gpu *gpu;
 	struct list_head node;   /* node in gpu submit_list */
 	struct list_head bo_list;
 	struct ww_acquire_ctx ticket;
 	uint32_t fence;
-	int ring;
 	bool valid;
-	uint64_t profile_buf_iova;
-	void *profile_buf_vaddr;
-	bool secure;
 	unsigned int nr_cmds;
 	unsigned int nr_bos;
 	struct {
 		uint32_t type;
 		uint32_t size;  /* in dwords */
-		uint64_t iova;
+		uint32_t iova;
 		uint32_t idx;   /* cmdstream buffer idx in bos[] */
-	} *cmd;  /* array of size nr_cmds */
+	} cmd[MAX_CMDS];
 	struct {
 		uint32_t flags;
 		struct msm_gem_object *obj;
-		uint64_t iova;
+		uint32_t iova;
 	} bos[0];
 };
 

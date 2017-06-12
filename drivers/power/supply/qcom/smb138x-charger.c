@@ -28,7 +28,7 @@
 #include "smb-reg.h"
 #include "smb-lib.h"
 #include "storm-watch.h"
-#include <linux/pmic-voter.h>
+#include "pmic-voter.h"
 
 #define SMB138X_DEFAULT_FCC_UA 1000000
 #define SMB138X_DEFAULT_ICL_UA 1500000
@@ -45,7 +45,6 @@
 #define STACKED_DIODE_EN_BIT		BIT(2)
 
 #define TDIE_AVG_COUNT	10
-#define MAX_SPEED_READING_TIMES		5
 
 enum {
 	OOB_COMP_WA_BIT = BIT(0),
@@ -96,7 +95,6 @@ struct smb_dt_props {
 	int	dc_icl_ua;
 	int	chg_temp_max_mdegc;
 	int	connector_temp_max_mdegc;
-	int	pl_mode;
 };
 
 struct smb138x {
@@ -128,16 +126,8 @@ static int smb138x_get_prop_charger_temp(struct smb138x *chip,
 	union power_supply_propval pval;
 	int rc = 0, avg = 0, i;
 	struct smb_charger *chg = &chip->chg;
-	int die_avg_count;
 
-	if (chg->temp_speed_reading_count < MAX_SPEED_READING_TIMES) {
-		chg->temp_speed_reading_count++;
-		die_avg_count = 1;
-	} else {
-		die_avg_count = TDIE_AVG_COUNT;
-	}
-
-	for (i = 0; i < die_avg_count; i++) {
+	for (i = 0; i < TDIE_AVG_COUNT; i++) {
 		pval.intval = 0;
 		rc = smblib_get_prop_charger_temp(chg, &pval);
 		if (rc < 0) {
@@ -147,7 +137,7 @@ static int smb138x_get_prop_charger_temp(struct smb138x *chip,
 		}
 		avg += pval.intval;
 	}
-	val->intval = avg / die_avg_count;
+	val->intval = avg / TDIE_AVG_COUNT;
 	return rc;
 }
 
@@ -161,11 +151,6 @@ static int smb138x_parse_dt(struct smb138x *chip)
 		pr_err("device tree node missing\n");
 		return -EINVAL;
 	}
-
-	rc = of_property_read_u32(node,
-				"qcom,parallel-mode", &chip->dt.pl_mode);
-	if (rc < 0)
-		chip->dt.pl_mode = POWER_SUPPLY_PL_USBMID_USBMID;
 
 	chip->dt.suspend_input = of_property_read_bool(node,
 				"qcom,suspend-input");
@@ -479,64 +464,11 @@ static int smb138x_init_batt_psy(struct smb138x *chip)
  * PARALLEL PSY REGISTRATION *
  *****************************/
 
-static int smb138x_get_prop_connector_health(struct smb138x *chip)
-{
-	struct smb_charger *chg = &chip->chg;
-	int rc, lb_mdegc, ub_mdegc, rst_mdegc, connector_mdegc;
-
-	if (!chg->iio.connector_temp_chan ||
-		PTR_ERR(chg->iio.connector_temp_chan) == -EPROBE_DEFER)
-		chg->iio.connector_temp_chan = iio_channel_get(chg->dev,
-							"connector_temp");
-
-	if (IS_ERR(chg->iio.connector_temp_chan))
-		return POWER_SUPPLY_HEALTH_UNKNOWN;
-
-	rc = iio_read_channel_processed(chg->iio.connector_temp_thr1_chan,
-							&lb_mdegc);
-	if (rc < 0) {
-		pr_err("Couldn't read connector lower bound rc=%d\n", rc);
-		return POWER_SUPPLY_HEALTH_UNKNOWN;
-	}
-
-	rc = iio_read_channel_processed(chg->iio.connector_temp_thr2_chan,
-							&ub_mdegc);
-	if (rc < 0) {
-		pr_err("Couldn't read connector upper bound rc=%d\n", rc);
-		return POWER_SUPPLY_HEALTH_UNKNOWN;
-	}
-
-	rc = iio_read_channel_processed(chg->iio.connector_temp_thr3_chan,
-							&rst_mdegc);
-	if (rc < 0) {
-		pr_err("Couldn't read connector reset bound rc=%d\n", rc);
-		return POWER_SUPPLY_HEALTH_UNKNOWN;
-	}
-
-	rc = iio_read_channel_processed(chg->iio.connector_temp_chan,
-							&connector_mdegc);
-	if (rc < 0) {
-		pr_err("Couldn't read connector temperature rc=%d\n", rc);
-		return POWER_SUPPLY_HEALTH_UNKNOWN;
-	}
-
-	if (connector_mdegc < lb_mdegc)
-		return POWER_SUPPLY_HEALTH_COOL;
-	else if (connector_mdegc < ub_mdegc)
-		return POWER_SUPPLY_HEALTH_WARM;
-	else if (connector_mdegc < rst_mdegc)
-		return POWER_SUPPLY_HEALTH_HOT;
-
-	return POWER_SUPPLY_HEALTH_OVERHEAT;
-}
-
 static enum power_supply_property smb138x_parallel_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_TYPE,
 	POWER_SUPPLY_PROP_CHARGING_ENABLED,
 	POWER_SUPPLY_PROP_PIN_ENABLED,
 	POWER_SUPPLY_PROP_INPUT_SUSPEND,
-	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED,
-	POWER_SUPPLY_PROP_CURRENT_MAX,
 	POWER_SUPPLY_PROP_VOLTAGE_MAX,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
@@ -576,21 +508,6 @@ static int smb138x_parallel_get_prop(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_INPUT_SUSPEND:
 		rc = smblib_get_usb_suspend(chg, &val->intval);
 		break;
-	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED:
-		if ((chip->dt.pl_mode == POWER_SUPPLY_PL_USBIN_USBIN)
-		|| (chip->dt.pl_mode == POWER_SUPPLY_PL_USBIN_USBIN_EXT))
-			rc = smblib_get_prop_input_current_limited(chg, val);
-		else
-			val->intval = 0;
-		break;
-	case POWER_SUPPLY_PROP_CURRENT_MAX:
-		if ((chip->dt.pl_mode == POWER_SUPPLY_PL_USBIN_USBIN)
-		|| (chip->dt.pl_mode == POWER_SUPPLY_PL_USBIN_USBIN_EXT))
-			rc = smblib_get_charge_param(chg, &chg->param.usb_icl,
-				&val->intval);
-		else
-			val->intval = 0;
-		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
 		rc = smblib_get_charge_param(chg, &chg->param.fv, &val->intval);
 		break;
@@ -611,10 +528,10 @@ static int smb138x_parallel_get_prop(struct power_supply *psy,
 		val->strval = "smb138x";
 		break;
 	case POWER_SUPPLY_PROP_PARALLEL_MODE:
-		val->intval = chip->dt.pl_mode;
+		val->intval = POWER_SUPPLY_PL_USBMID_USBMID;
 		break;
 	case POWER_SUPPLY_PROP_CONNECTOR_HEALTH:
-		val->intval = smb138x_get_prop_connector_health(chip);
+		rc = smblib_get_prop_die_health(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_SET_SHIP_MODE:
 		/* Not in ship mode as long as device is active */
@@ -669,12 +586,6 @@ static int smb138x_parallel_set_prop(struct power_supply *psy,
 	switch (prop) {
 	case POWER_SUPPLY_PROP_INPUT_SUSPEND:
 		rc = smb138x_set_parallel_suspend(chip, (bool)val->intval);
-		break;
-	case POWER_SUPPLY_PROP_CURRENT_MAX:
-		if ((chip->dt.pl_mode == POWER_SUPPLY_PL_USBIN_USBIN)
-		|| (chip->dt.pl_mode == POWER_SUPPLY_PL_USBIN_USBIN_EXT))
-			rc = smblib_set_charge_param(chg, &chg->param.usb_icl,
-				val->intval);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
 		rc = smblib_set_charge_param(chg, &chg->param.fv, val->intval);
@@ -1487,16 +1398,6 @@ static int smb138x_slave_probe(struct smb138x *chip)
 		goto cleanup;
 	}
 
-	if ((chip->dt.pl_mode == POWER_SUPPLY_PL_USBIN_USBIN)
-		|| (chip->dt.pl_mode == POWER_SUPPLY_PL_USBIN_USBIN_EXT)) {
-		rc = smb138x_init_vbus_regulator(chip);
-		if (rc < 0) {
-			pr_err("Couldn't initialize vbus regulator rc=%d\n",
-				rc);
-			return rc;
-		}
-	}
-
 	rc = smb138x_init_parallel_psy(chip);
 	if (rc < 0) {
 		pr_err("Couldn't initialize parallel psy rc=%d\n", rc);
@@ -1521,8 +1422,6 @@ cleanup:
 	smblib_deinit(chg);
 	if (chip->parallel_psy)
 		power_supply_unregister(chip->parallel_psy);
-	if (chg->vbus_vreg && chg->vbus_vreg->rdev)
-		regulator_unregister(chg->vbus_vreg->rdev);
 	return rc;
 }
 

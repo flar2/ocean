@@ -7,4 +7,3 @@ obj-$(CONFIG_MSM_VIDC_V4L2) += vidc/
 obj-y += sde/
 obj-y += broadcast/
 obj-$(CONFIG_DVB_MPQ) += dvb/
-obj-$(CONFIG_MSM_AIS) += ais/

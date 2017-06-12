@@ -21,24 +21,14 @@
 		status = "ok";
 	};
 
-	led_flash1: qcom,camera-flash@1 {
+/*	led_flash1: qcom,camera-flash@1 {
 		cell-index = <1>;
 		compatible = "qcom,camera-flash";
 		qcom,flash-source = <&pmi8998_flash2>;
 		qcom,torch-source = <&pmi8998_torch2>;
 		qcom,switch-source = <&pmi8998_switch1>;
 		status = "ok";
-	};
-
-	actuator_regulator: gpio-regulator@0 {
-		compatible = "regulator-fixed";
-		regulator-name = "rear_vana_regulator";
-		regulator-min-microvolt = <2800000>;
-		regulator-max-microvolt = <2800000>;
-		enable-active-high;
-		gpio = <&tlmm 27 0>;
-		vin-supply = <&pmi8998_bob>;
-	};
+	};*/
 };
 
 &cci {
@@ -47,11 +37,14 @@
 		reg = <0x0>;
 		compatible = "qcom,actuator";
 		qcom,cci-master = <0>;
-		cam_vaf-supply = <&actuator_regulator>;
-		qcom,cam-vreg-name = "cam_vaf";
-		qcom,cam-vreg-min-voltage = <2800000>;
-		qcom,cam-vreg-max-voltage = <2800000>;
-		qcom,cam-vreg-op-mode = <0>;
+		gpios = <&tlmm 27 0>;
+		qcom,gpio-vaf = <0>;
+		qcom,gpio-req-tbl-num = <0>;
+		qcom,gpio-req-tbl-flags = <0>;
+		qcom,gpio-req-tbl-label = "CAM_VAF";
+		pinctrl-names = "cam_default", "cam_suspend";
+		pinctrl-0 = <&cam_actuator_vaf_active>;
+		pinctrl-1 = <&cam_actuator_vaf_suspend>;
 	};
 
 	actuator1: qcom,actuator@1 {
@@ -59,11 +52,14 @@
 		reg = <0x1>;
 		compatible = "qcom,actuator";
 		qcom,cci-master = <1>;
-		cam_vaf-supply = <&actuator_regulator>;
-		qcom,cam-vreg-name = "cam_vaf";
-		qcom,cam-vreg-min-voltage = <2800000>;
-		qcom,cam-vreg-max-voltage = <2800000>;
-		qcom,cam-vreg-op-mode = <0>;
+		gpios = <&tlmm 27 0>;
+		qcom,gpio-vaf = <0>;
+		qcom,gpio-req-tbl-num = <0>;
+		qcom,gpio-req-tbl-flags = <0>;
+		qcom,gpio-req-tbl-label = "CAM_VAF";
+		pinctrl-names = "cam_default", "cam_suspend";
+		pinctrl-0 = <&cam_actuator_vaf_active>;
+		pinctrl-1 = <&cam_actuator_vaf_suspend>;
 	};
 
 	ois0: qcom,ois@0 {
@@ -82,24 +78,24 @@
 		status = "disabled";
 	};
 
-	tof0: qcom,tof@0 {
+	tof0:qcom,tof@0{
 		cell-index = <0>;
 		reg = <0x29>;
 		compatible = "st,stmvl53l0";
 		qcom,cci-master = <0>;
 		cam_cci-supply = <&pm8998_lvs1>;
-		cam_laser-supply = <&actuator_regulator>;
+		cam_laser-supply = <&pmi8998_bob>;
 		qcom,cam-vreg-name = "cam_cci", "cam_laser";
 		qcom,cam-vreg-min-voltage = <0 0>;
-		qcom,cam-vreg-max-voltage = <0 2800000>;
+		qcom,cam-vreg-max-voltage = <0 3600000>;
 		pinctrl-names = "cam_default", "cam_suspend";
 		pinctrl-0 = <&cam_tof_active>;
 		pinctrl-1 = <&cam_tof_suspend>;
-		stm,irq-gpio = <&tlmm 26 0x2008>;
-		gpios = <&tlmm 126 0>;
-		qcom,gpio-req-tbl-num = <0>;
-		qcom,gpio-req-tbl-flags = <0>;
-		qcom,gpio-req-tbl-label = "CAM_CE";
+		gpios = <&tlmm 27 0>,
+				<&tlmm 126 0>;
+		qcom,gpio-req-tbl-num = <0 1>;
+		qcom,gpio-req-tbl-flags = <0 0>;
+		qcom,gpio-req-tbl-label = "CAM_TOF", "CAM_CE";
 	};
 
 	eeprom0: qcom,eeprom@0 {
@@ -165,7 +161,7 @@
 		pinctrl-1 = <&cam_sensor_mclk2_suspend
 				 &cam_sensor_rear2_suspend>;
 		gpios = <&tlmm 15 0>,
-			<&tlmm 9 0>,
+			/*<&tlmm 9 0>,*/
 			<&tlmm 8 0>;
 		qcom,gpio-reset = <1>;
 		qcom,gpio-vana = <2>;
@@ -293,7 +289,7 @@
 		pinctrl-1 = <&cam_sensor_mclk2_suspend
 				 &cam_sensor_rear2_suspend>;
 		gpios = <&tlmm 15 0>,
-			<&tlmm 9 0>,
+			/*<&tlmm 9 0>,*/
 			<&tlmm 8 0>;
 		qcom,gpio-reset = <1>;
 		qcom,gpio-vana = <2>;
@@ -320,7 +316,7 @@
 		qcom,csid-sd-index = <2>;
 		qcom,mount-angle = <90>;
 		qcom,eeprom-src = <&eeprom2>;
-		qcom,led-flash-src = <&led_flash1>;
+//		qcom,led-flash-src = <&led_flash1>;
 		qcom,actuator-src = <&actuator1>;
 		cam_vio-supply = <&pm8998_lvs1>;
 		cam_vana-supply = <&pm8998_l22>;

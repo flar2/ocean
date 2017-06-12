@@ -19,7 +19,6 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-#include <linux/file.h>
 #include <linux/kernel.h>
 #include <linux/audit.h>
 #include <linux/kthread.h>
@@ -545,11 +544,10 @@ int audit_exe_compare(struct task_struct *tsk, struct audit_fsnotify_mark *mark)
 	unsigned long ino;
 	dev_t dev;
 
-	exe_file = get_task_exe_file(tsk);
-	if (!exe_file)
-		return 0;
+	rcu_read_lock();
+	exe_file = rcu_dereference(tsk->mm->exe_file);
 	ino = exe_file->f_inode->i_ino;
 	dev = exe_file->f_inode->i_sb->s_dev;
-	fput(exe_file);
+	rcu_read_unlock();
 	return audit_mark_compare(mark, ino, dev);
 }

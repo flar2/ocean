@@ -2,7 +2,7 @@
  * drivers/staging/android/ion/ion_system_heap.c
  *
  * Copyright (C) 2011 Google, Inc.
- * Copyright (c) 2011-2017, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2011-2016, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -123,11 +123,9 @@ static struct page *alloc_buffer_page(struct ion_system_heap *heap,
 		gfp_t gfp_mask = low_order_gfp_flags;
 		if (order)
 			gfp_mask = high_order_gfp_flags;
-
 		page = alloc_pages(gfp_mask, order);
-		if (page)
-			ion_pages_sync_for_device(dev, page, PAGE_SIZE << order,
-						  DMA_BIDIRECTIONAL);
+		ion_pages_sync_for_device(dev, page, PAGE_SIZE << order,
+					  DMA_BIDIRECTIONAL);
 	}
 	if (!page)
 		return 0;
@@ -160,6 +158,7 @@ static void free_buffer_page(struct ion_system_heap *heap,
 		else
 			ion_page_pool_free(pool, page);
 	} else {
+		ion_alloc_dec_usage(ION_TOTAL, 1 << order);
 		__free_pages(page, order);
 	}
 }
@@ -346,6 +345,7 @@ static int ion_system_heap_allocate(struct ion_heap *heap,
 	int i = 0;
 	unsigned int nents_sync = 0;
 	unsigned long size_remaining = PAGE_ALIGN(size);
+	size_t total_pages = 0;
 	unsigned int max_order = orders[0];
 	struct pages_mem data;
 	unsigned int sz;
@@ -385,6 +385,7 @@ static int ion_system_heap_allocate(struct ion_heap *heap,
 			++nents_sync;
 		}
 		size_remaining -= sz;
+		total_pages += 1 << info->order;
 		max_order = info->order;
 		i++;
 	}
@@ -459,6 +460,7 @@ static int ion_system_heap_allocate(struct ion_heap *heap,
 	}
 
 	buffer->priv_virt = table;
+	ion_alloc_inc_usage(ION_IN_USE, total_pages);
 	if (nents_sync)
 		sg_free_table(&table_sync);
 	msm_ion_heap_free_pages_mem(&data);
@@ -516,9 +518,11 @@ void ion_system_heap_free(struct ion_buffer *buffer)
 			return;
 	}
 
-	for_each_sg(table->sgl, sg, table->nents, i)
+	for_each_sg(table->sgl, sg, table->nents, i) {
+		ion_alloc_dec_usage(ION_IN_USE, 1 << get_order(sg->length));
 		free_buffer_page(sys_heap, buffer, sg_page(sg),
 				get_order(sg->length));
+	}
 	sg_free_table(table);
 	kfree(table);
 }

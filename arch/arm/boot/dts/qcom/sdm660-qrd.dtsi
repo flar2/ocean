@@ -119,19 +119,6 @@
 	};
 };
 
-&qusb_phy0 {
-	qcom,qusb-phy-init-seq = <0xf8 0x80
-				0x80 0x84
-				0x83 0x88
-				0xc7 0x8c
-				0x30 0x08
-				0x79 0x0c
-				0x21 0x10
-				0x14 0x9c
-				0x9f 0x1c
-				0x00 0x18>;
-};
-
 &pm660_gpios {
 	/* GPIO 4 (NFC_CLK_REQ) */
 	gpio@c300 {
@@ -209,12 +196,6 @@
 	};
 };
 
-&ssphy {
-	fpc-redrive-supply = <&pm660_l11>;
-	qcom,redrive-voltage-level = <0 1800000 1950000>;
-	qcom,redrive-load = <105000>;
-};
-
 &soc {
 	gpio_keys {
 		compatible = "gpio-keys";
@@ -230,6 +211,24 @@
 			debounce-interval = <15>;
 		};
 	};
+
+	hbtp {
+		compatible = "qcom,hbtp-input";
+		pinctrl-names = "pmx_ts_active", "pmx_ts_suspend";
+		pinctrl-0 = <&ts_rst_active>;
+		pinctrl-1 = <&ts_rst_suspend>;
+		vcc_ana-supply = <&pm660l_l3>;
+		vcc_dig-supply = <&pm660_l13>;
+		qcom,afe-load = <20000>;
+		qcom,afe-vtg-min = <3008000>;
+		qcom,afe-vtg-max = <3008000>;
+		qcom,dig-load = <40000>;
+		qcom,dig-vtg-min = <1808000>;
+		qcom,dig-vtg-max = <1808000>;
+		qcom,fb-resume-delay-us = <10000>;
+		qcom,afe-power-on-delay-us = <1000>;
+		qcom,afe-power-off-delay-us = <6>;
+	};
 };
 
 / {
@@ -243,12 +242,11 @@
 &pm660_fg {
 	qcom,battery-data = <&qrd_batterydata>;
 	qcom,fg-jeita-thresholds = <0 5 55 55>;
-	qcom,battery-thermal-coefficients = [9d 50 ff];
 };
 
 &i2c_2 {
 	status = "ok";
-	smb1351_charger: smb1351-charger@1d {
+	smb1351-charger@1d {
 		compatible = "qcom,smb1351-charger";
 		reg = <0x1d>;
 		qcom,parallel-charger;

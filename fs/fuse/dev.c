@@ -25,6 +25,8 @@
 
 MODULE_ALIAS_MISCDEV(FUSE_MINOR);
 MODULE_ALIAS("devname:fuse");
+#define wake_up_sync_locked(x)   __wake_up_sync_locked((x), TASK_NORMAL, 1)
+#define wake_up_sync(x)   __wake_up_sync((x), TASK_NORMAL, 1)
 
 static struct kmem_cache *fuse_req_cachep;
 
@@ -331,7 +333,7 @@ static void queue_request(struct fuse_iqueue *fiq, struct fuse_req *req)
 	req->in.h.len = sizeof(struct fuse_in_header) +
 		len_args(req->in.numargs, (struct fuse_arg *) req->in.args);
 	list_add_tail(&req->list, &fiq->pending);
-	wake_up_locked(&fiq->waitq);
+	wake_up_sync_locked(&fiq->waitq);
 	kill_fasync(&fiq->fasync, SIGIO, POLL_IN);
 }
 
@@ -412,7 +414,7 @@ static void request_end(struct fuse_conn *fc, struct fuse_req *req)
 		flush_bg_queue(fc);
 		spin_unlock(&fc->lock);
 	}
-	wake_up(&req->waitq);
+	wake_up_sync(&req->waitq);
 	if (req->end)
 		req->end(fc, req);
 	fuse_put_request(fc, req);
@@ -2102,6 +2104,7 @@ static void end_requests(struct fuse_conn *fc, struct list_head *head)
 		struct fuse_req *req;
 		req = list_entry(head->next, struct fuse_req, list);
 		req->out.h.error = -ECONNABORTED;
+		clear_bit(FR_PENDING, &req->flags);
 		clear_bit(FR_SENT, &req->flags);
 		list_del_init(&req->list);
 		request_end(fc, req);
@@ -2179,8 +2182,6 @@ void fuse_abort_conn(struct fuse_conn *fc)
 		spin_lock(&fiq->waitq.lock);
 		fiq->connected = 0;
 		list_splice_init(&fiq->pending, &to_end2);
-		list_for_each_entry(req, &to_end2, list)
-			clear_bit(FR_PENDING, &req->flags);
 		while (forget_pending(fiq))
 			kfree(dequeue_forget(fiq, 1, NULL));
 		wake_up_all_locked(&fiq->waitq);

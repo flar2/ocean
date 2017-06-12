@@ -39,6 +39,7 @@
 #include <linux/balloon_compaction.h>
 #include <linux/mmu_notifier.h>
 #include <linux/page_idle.h>
+#include <htc_debug/stability/debug_page_user_trace.h>
 
 #include <asm/tlbflush.h>
 
@@ -614,6 +615,8 @@ static void copy_huge_page(struct page *dst, struct page *src)
 void migrate_page_copy(struct page *newpage, struct page *page)
 {
 	int cpupid;
+
+	migrate_page_copy_user_trace(newpage, page);
 
 	if (PageHuge(page) || PageTransHuge(page))
 		copy_huge_page(newpage, page);

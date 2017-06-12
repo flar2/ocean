@@ -588,6 +588,14 @@ enum soc_id {
 	SDM630_SOC_ID     = 4,
 };
 
+#define HTC_TARGET_QUOT_LEN MSM8998_KBSS_FUSE_CORNERS
+volatile u64 htc_target_quot[2][HTC_TARGET_QUOT_LEN];
+const int htc_target_quot_len = HTC_TARGET_QUOT_LEN;
+
+#if HTC_TARGET_QUOT_LEN != 4
+#error "check htc_target_quot size in cpuinfo.c"
+#endif
+
 /**
  * cprh_msm8998_kbss_read_fuse_data() - load msm8998 KBSS specific fuse
  *		parameter values
@@ -633,6 +641,7 @@ static int cprh_msm8998_kbss_read_fuse_data(struct cpr3_regulator *vreg,
 				i, rc);
 			return rc;
 		}
+		htc_target_quot[id][i] = fuse->target_quot[i];
 
 		rc = cpr3_read_fuse_param(base,
 				msm8998_kbss_ro_sel_param[id][i],

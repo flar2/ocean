@@ -18,7 +18,6 @@
 #include "ext4.h"
 #include "xattr.h"
 #include "truncate.h"
-#include <trace/events/android_fs.h>
 
 #define EXT4_XATTR_SYSTEM_DATA	"data"
 #define EXT4_MIN_INLINE_DATA_SIZE	((sizeof(__le32) * EXT4_N_BLOCKS))
@@ -337,10 +336,8 @@ static int ext4_update_inline_data(handle_t *handle, struct inode *inode,
 
 	len -= EXT4_MIN_INLINE_DATA_SIZE;
 	value = kzalloc(len, GFP_NOFS);
-	if (!value) {
-		error = -ENOMEM;
+	if (!value)
 		goto out;
-	}
 
 	error = ext4_xattr_ibody_get(inode, i.name_index, i.name,
 				     value, len);
@@ -503,17 +500,6 @@ int ext4_readpage_inline(struct inode *inode, struct page *page)
 		return -EAGAIN;
 	}
 
-	if (trace_android_fs_dataread_start_enabled()) {
-		char *path, pathbuf[MAX_TRACE_PATHBUF_LEN];
-
-		path = android_fstrace_get_pathname(pathbuf,
-						    MAX_TRACE_PATHBUF_LEN,
-						    inode);
-		trace_android_fs_dataread_start(inode, page_offset(page),
-						PAGE_SIZE, current->pid,
-						path, current->comm);
-	}
-
 	/*
 	 * Current inline data can only exist in the 1st page,
 	 * So for all the other pages, just set them uptodate.
@@ -524,8 +510,6 @@ int ext4_readpage_inline(struct inode *inode, struct page *page)
 		zero_user_segment(page, 0, PAGE_CACHE_SIZE);
 		SetPageUptodate(page);
 	}
-
-	trace_android_fs_dataread_end(inode, page_offset(page), PAGE_SIZE);
 
 	up_read(&EXT4_I(inode)->xattr_sem);
 
@@ -947,15 +931,8 @@ int ext4_da_write_inline_data_end(struct inode *inode, loff_t pos,
 				  struct page *page)
 {
 	int i_size_changed = 0;
-	int ret;
 
-	ret = ext4_write_inline_data_end(inode, pos, len, copied, page);
-	if (ret < 0) {
-		unlock_page(page);
-		put_page(page);
-		return ret;
-	}
-	copied = ret;
+	copied = ext4_write_inline_data_end(inode, pos, len, copied, page);
 
 	/*
 	 * No need to use i_size_read() here, the i_size
@@ -1171,9 +1148,10 @@ static int ext4_finish_convert_inline_dir(handle_t *handle,
 	set_buffer_uptodate(dir_block);
 	err = ext4_handle_dirty_dirent_node(handle, inode, dir_block);
 	if (err)
-		return err;
+		goto out;
 	set_buffer_verified(dir_block);
-	return ext4_mark_inode_dirty(handle, inode);
+out:
+	return err;
 }
 
 static int ext4_convert_inline_data_nolock(handle_t *handle,
@@ -1650,8 +1628,13 @@ struct buffer_head *ext4_find_inline_entry(struct inode *dir,
 	inline_start = (void *)ext4_raw_inode(&iloc)->i_block +
 						EXT4_INLINE_DOTDOT_SIZE;
 	inline_size = EXT4_MIN_INLINE_DATA_SIZE - EXT4_INLINE_DOTDOT_SIZE;
+#ifdef CONFIG_SDCARD_FS_CI_SEARCH
+	ret = ext4_search_dir(iloc.bh, inline_start, inline_size,
+			      dir, fname, d_name, 0, res_dir, NULL);
+#else
 	ret = ext4_search_dir(iloc.bh, inline_start, inline_size,
 			      dir, fname, d_name, 0, res_dir);
+#endif
 	if (ret == 1)
 		goto out_find;
 	if (ret < 0)
@@ -1663,8 +1646,13 @@ struct buffer_head *ext4_find_inline_entry(struct inode *dir,
 	inline_start = ext4_get_inline_xattr_pos(dir, &iloc);
 	inline_size = ext4_get_inline_size(dir) - EXT4_MIN_INLINE_DATA_SIZE;
 
+#ifdef CONFIG_SDCARD_FS_CI_SEARCH
+	ret = ext4_search_dir(iloc.bh, inline_start, inline_size,
+			      dir, fname, d_name, 0, res_dir, NULL);
+#else
 	ret = ext4_search_dir(iloc.bh, inline_start, inline_size,
 			      dir, fname, d_name, 0, res_dir);
+#endif
 	if (ret == 1)
 		goto out_find;
 

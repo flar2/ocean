@@ -38,6 +38,10 @@
 
 #include "irq-gic-common.h"
 
+#ifdef CONFIG_HTC_DEBUG_WATCHDOG
+#include <linux/htc_debug_tools.h>
+#endif
+
 struct redist_region {
 	void __iomem		*redist_base;
 	phys_addr_t		phys_base;
@@ -63,6 +67,7 @@ struct gic_chip_data {
 
 static struct gic_chip_data gic_data __read_mostly;
 static struct static_key supports_deactivate = STATIC_KEY_INIT_TRUE;
+static DEFINE_RAW_SPINLOCK(irq_controller_lock);
 
 #define gic_data_rdist()		(this_cpu_ptr(gic_data.rdists.rdist))
 #define gic_data_rdist_rd_base()	(gic_data_rdist()->rd_base)
@@ -154,7 +159,7 @@ static void gic_enable_redist(bool enable)
 			return;	/* No PM support in this redistributor */
 	}
 
-	while (--count) {
+	while (count--) {
 		val = readl_relaxed(rbase + GICR_WAKER);
 		if (enable ^ (val & GICR_WAKER_ChildrenAsleep))
 			break;
@@ -289,9 +294,6 @@ static int gic_irq_get_irqchip_state(struct irq_data *d,
 }
 static void gic_disable_irq(struct irq_data *d)
 {
-	/* don't lazy-disable PPIs */
-	if (gic_irq(d) < 32)
-		gic_mask_irq(d);
 	if (gic_arch_extn.irq_disable)
 		gic_arch_extn.irq_disable(d);
 }
@@ -414,21 +416,24 @@ static int gic_suspend(void)
 	return 0;
 }
 
+extern void gpio_show_resume_irq(void);
 static void gic_show_resume_irq(struct gic_chip_data *gic)
 {
 	unsigned int i;
 	u32 enabled;
 	u32 pending[32];
 	void __iomem *base = gic_data_dist_base(gic);
-
+	msm_show_resume_irq_mask = 1;
 	if (!msm_show_resume_irq_mask)
 		return;
 
+	raw_spin_lock(&irq_controller_lock);
 	for (i = 0; i * 32 < gic->irq_nr; i++) {
 		enabled = readl_relaxed(base + GICD_ICENABLER + i * 4);
 		pending[i] = readl_relaxed(base + GICD_ISPENDR + i * 4);
 		pending[i] &= enabled;
 	}
+	raw_spin_unlock(&irq_controller_lock);
 
 	for (i = find_first_bit((unsigned long *)pending, gic->irq_nr);
 	     i < gic->irq_nr;
@@ -441,8 +446,13 @@ static void gic_show_resume_irq(struct gic_chip_data *gic)
 			name = "stray irq";
 		else if (desc->action && desc->action->name)
 			name = desc->action->name;
-
+#ifdef CONFIG_HTC_POWER_DEBUG
+		pr_info("[WAKEUP] Resume caused by gic-%d, %d triggered %s\n", i, irq, name);
+		if(i == 240)
+			gpio_show_resume_irq();
+#else
 		pr_warn("%s: %d triggered %s\n", __func__, irq, name);
+#endif
 	}
 }
 
@@ -502,6 +512,14 @@ static asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs
 
 		if (likely(irqnr > 15 && irqnr < 1020) || irqnr >= 8192) {
 			int err;
+
+#if defined(CONFIG_HTC_DEBUG_WATCHDOG)
+                       /* only check on timer interrupt */
+                       if (irqnr == 19 && smp_processor_id() == 0) {
+                               unsigned long long timestamp = sched_clock();
+                               htc_debug_watchdog_check_pet(timestamp);
+                       }
+#endif /* CONFIG_HTC_DEBUG_WATCHDOG */
 			uncached_logk(LOGK_IRQ, (void *)(uintptr_t)irqnr);
 			if (static_key_true(&supports_deactivate))
 				gic_write_eoir(irqnr);
@@ -705,7 +723,7 @@ static struct notifier_block gic_cpu_notifier = {
 static u16 gic_compute_target_list(int *base_cpu, const struct cpumask *mask,
 				   unsigned long cluster_id)
 {
-	int next_cpu, cpu = *base_cpu;
+	int cpu = *base_cpu;
 	unsigned long mpidr = cpu_logical_map(cpu);
 	u16 tlist = 0;
 
@@ -719,10 +737,9 @@ static u16 gic_compute_target_list(int *base_cpu, const struct cpumask *mask,
 
 		tlist |= 1 << (mpidr & 0xf);
 
-		next_cpu = cpumask_next(cpu, mask);
-		if (next_cpu >= nr_cpu_ids)
+		cpu = cpumask_next(cpu, mask);
+		if (cpu >= nr_cpu_ids)
 			goto out;
-		cpu = next_cpu;
 
 		mpidr = cpu_logical_map(cpu);
 

@@ -17,7 +17,6 @@
 #include <linux/device.h>
 #include <linux/usb/audio.h>
 #include <linux/wait.h>
-#include <linux/pm_qos.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -269,8 +268,6 @@ struct audio_dev {
 	/* number of frames sent since start_time */
 	s64				frames_sent;
 	struct audio_source_config	*config;
-	/* for creating and issuing QoS requests */
-	struct pm_qos_request pm_qos;
 };
 
 static inline struct audio_dev *func_to_audio(struct usb_function *f)
@@ -313,7 +310,6 @@ static struct device_attribute *audio_source_function_attributes[] = {
 static struct usb_request *audio_request_new(struct usb_ep *ep, int buffer_size)
 {
 	struct usb_request *req = usb_ep_alloc_request(ep, GFP_KERNEL);
-
 	if (!req)
 		return NULL;
 
@@ -369,28 +365,22 @@ static void audio_send(struct audio_dev *audio)
 	s64 msecs;
 	s64 frames;
 	ktime_t now;
-	unsigned long flags;
 
-	spin_lock_irqsave(&audio->lock, flags);
 	/* audio->substream will be null if we have been closed */
-	if (!audio->substream) {
-		spin_unlock_irqrestore(&audio->lock, flags);
+	if (!audio->substream)
 		return;
-	}
 	/* audio->buffer_pos will be null if we have been stopped */
-	if (!audio->buffer_pos) {
-		spin_unlock_irqrestore(&audio->lock, flags);
+	if (!audio->buffer_pos)
 		return;
-	}
 
 	runtime = audio->substream->runtime;
-	spin_unlock_irqrestore(&audio->lock, flags);
 
 	/* compute number of frames to send */
 	now = ktime_get();
-	msecs = div_s64((ktime_to_ns(now) - ktime_to_ns(audio->start_time)),
-			1000000);
-	frames = div_s64((msecs * SAMPLE_RATE), 1000);
+	msecs = ktime_to_ns(now) - ktime_to_ns(audio->start_time);
+	do_div(msecs, 1000000);
+	frames = msecs * SAMPLE_RATE;
+	do_div(frames, 1000);
 
 	/* Readjust our frames_sent if we fall too far behind.
 	 * If we get too far behind it is better to drop some frames than
@@ -407,21 +397,8 @@ static void audio_send(struct audio_dev *audio)
 
 	while (frames > 0) {
 		req = audio_req_get(audio);
-		spin_lock_irqsave(&audio->lock, flags);
-		/* audio->substream will be null if we have been closed */
-		if (!audio->substream) {
-			spin_unlock_irqrestore(&audio->lock, flags);
-			return;
-		}
-		/* audio->buffer_pos will be null if we have been stopped */
-		if (!audio->buffer_pos) {
-			spin_unlock_irqrestore(&audio->lock, flags);
-			return;
-		}
-		if (!req) {
-			spin_unlock_irqrestore(&audio->lock, flags);
+		if (!req)
 			break;
-		}
 
 		length = frames_to_bytes(runtime, frames);
 		if (length > IN_EP_MAX_PACKET_SIZE)
@@ -447,7 +424,6 @@ static void audio_send(struct audio_dev *audio)
 		}
 
 		req->length = length;
-		spin_unlock_irqrestore(&audio->lock, flags);
 		ret = usb_ep_queue(audio->in_ep, req, GFP_ATOMIC);
 		if (ret < 0) {
 			pr_err("usb_ep_queue failed ret: %d\n", ret);
@@ -764,10 +740,6 @@ static int audio_pcm_open(struct snd_pcm_substream *substream)
 	runtime->hw.channels_max = 2;
 
 	audio->substream = substream;
-
-	/* Add the QoS request and set the latency to 0 */
-	pm_qos_add_request(&audio->pm_qos, PM_QOS_CPU_DMA_LATENCY, 0);
-
 	return 0;
 }
 
@@ -777,10 +749,6 @@ static int audio_pcm_close(struct snd_pcm_substream *substream)
 	unsigned long flags;
 
 	spin_lock_irqsave(&audio->lock, flags);
-
-	/* Remove the QoS request */
-	pm_qos_remove_request(&audio->pm_qos);
-
 	audio->substream = NULL;
 	spin_unlock_irqrestore(&audio->lock, flags);
 
@@ -1021,7 +989,6 @@ static ssize_t audio_source_pcm_show(struct device *dev,
 
 struct device *create_function_device(char *name);
 
-#define AUDIO_SOURCE_DEV_NAME_LENGTH 20
 static struct usb_function_instance *audio_source_alloc_inst(void)
 {
 	struct audio_source_instance *fi_audio;
@@ -1030,8 +997,6 @@ static struct usb_function_instance *audio_source_alloc_inst(void)
 	struct device *dev;
 	void *err_ptr;
 	int err = 0;
-	char device_name[AUDIO_SOURCE_DEV_NAME_LENGTH];
-	static u8 count;
 
 	fi_audio = kzalloc(sizeof(*fi_audio), GFP_KERNEL);
 	if (!fi_audio)
@@ -1049,11 +1014,7 @@ static struct usb_function_instance *audio_source_alloc_inst(void)
 
 	config_group_init_type_name(&fi_audio->func_inst.group, "",
 						&audio_source_func_type);
-
-	snprintf(device_name, AUDIO_SOURCE_DEV_NAME_LENGTH,
-					"f_audio_source%d", count++);
-
-	dev = create_function_device(device_name);
+	dev = create_function_device("f_audio_source");
 
 	if (IS_ERR(dev)) {
 		err_ptr = dev;

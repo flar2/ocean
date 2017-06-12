@@ -22,15 +22,12 @@
 
 struct msm_ringbuffer {
 	struct msm_gpu *gpu;
-	int id;
+	int size;
 	struct drm_gem_object *bo;
-	uint32_t *start, *end, *cur, *next;
-	uint64_t iova;
-	uint32_t submitted_fence;
-	spinlock_t lock;
+	uint32_t *start, *end, *cur;
 };
 
-struct msm_ringbuffer *msm_ringbuffer_new(struct msm_gpu *gpu, int id);
+struct msm_ringbuffer *msm_ringbuffer_new(struct msm_gpu *gpu, int size);
 void msm_ringbuffer_destroy(struct msm_ringbuffer *ring);
 
 /* ringbuffer helpers (the parts that are same for a3xx/a2xx/z180..) */
@@ -38,13 +35,9 @@ void msm_ringbuffer_destroy(struct msm_ringbuffer *ring);
 static inline void
 OUT_RING(struct msm_ringbuffer *ring, uint32_t data)
 {
-	/*
-	 * ring->next points to the current command being written - it won't be
-	 * committed as ring->cur until the flush
-	 */
-	if (ring->next == ring->end)
-		ring->next = ring->start;
-	*(ring->next++) = data;
+	if (ring->cur == ring->end)
+		ring->cur = ring->start;
+	*(ring->cur++) = data;
 }
 
 #endif /* __MSM_RINGBUFFER_H__ */

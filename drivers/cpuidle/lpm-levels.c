@@ -36,14 +36,12 @@
 #include <linux/moduleparam.h>
 #include <linux/sched.h>
 #include <linux/cpu_pm.h>
-#include <linux/arm-smccc.h>
 #include <soc/qcom/spm.h>
 #include <soc/qcom/pm.h>
 #include <soc/qcom/rpm-notifier.h>
 #include <soc/qcom/event_timer.h>
 #include <soc/qcom/lpm-stats.h>
 #include <soc/qcom/jtag.h>
-#include <soc/qcom/minidump.h>
 #include <asm/cputype.h>
 #include <asm/arch_timer.h>
 #include <asm/cacheflush.h>
@@ -52,15 +50,37 @@
 #include "lpm-levels.h"
 #include "lpm-workarounds.h"
 #include <trace/events/power.h>
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+#include <htc_mnemosyne/htc_footprint.h>
+#endif
 #define CREATE_TRACE_POINTS
 #include <trace/events/trace_msm_low_power.h>
 #include "../../drivers/clk/msm/clock.h"
+#ifdef CONFIG_HTC_POWER_DEBUG
+#include <linux/pinctrl/pinctrl.h>
+#include <linux/qpnp/pin.h>
+#include <soc/qcom/htc_util.h>
+#endif
 
 #define SCLK_HZ (32768)
 #define SCM_HANDOFF_LOCK_ID "S:7"
 #define PSCI_POWER_STATE(reset) (reset << 30)
 #define PSCI_AFFINITY_LEVEL(lvl) ((lvl & 0x3) << 24)
 static remote_spinlock_t scm_handoff_lock;
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+enum {
+	HTC_PM_DEBUG_CLOCK = BIT(0),
+	HTC_PM_DEBUG_GPIO = BIT(1),
+	HTC_PM_DEBUG_VREG = BIT(2),
+};
+
+static int htc_pm_debug_mask = 0;
+
+module_param_named(
+        htc_pm_debug_mask, htc_pm_debug_mask, int, S_IRUGO | S_IWUSR | S_IWGRP
+);
+#endif
 
 enum {
 	MSM_LPM_LVL_DBG_SUSPEND_LIMITS = BIT(0),
@@ -73,8 +93,6 @@ enum debug_event {
 	CLUSTER_ENTER,
 	CLUSTER_EXIT,
 	PRE_PC_CB,
-	CPU_HP_STARTING,
-	CPU_HP_DYING,
 };
 
 struct lpm_debug {
@@ -165,13 +183,13 @@ s32 msm_cpuidle_get_deep_idle_latency(void)
 void lpm_suspend_wake_time(uint64_t wakeup_time)
 {
 	if (wakeup_time <= 0) {
-		suspend_wake_time = msm_pm_sleep_time_override * MSEC_PER_SEC;
+		suspend_wake_time = msm_pm_sleep_time_override;
 		return;
 	}
 
 	if (msm_pm_sleep_time_override &&
 		(msm_pm_sleep_time_override < wakeup_time))
-		suspend_wake_time = msm_pm_sleep_time_override * MSEC_PER_SEC;
+		suspend_wake_time = msm_pm_sleep_time_override;
 	else
 		suspend_wake_time = wakeup_time;
 }
@@ -344,16 +362,10 @@ static int lpm_cpu_callback(struct notifier_block *cpu_nb,
 
 	switch (action & ~CPU_TASKS_FROZEN) {
 	case CPU_DYING:
-		update_debug_pc_event(CPU_HP_DYING, cpu,
-				cluster->num_children_in_sync.bits[0],
-				cluster->child_cpus.bits[0], false);
 		cluster_prepare(cluster, get_cpu_mask((unsigned int) cpu),
 					NR_LPM_LEVELS, false, 0);
 		break;
 	case CPU_STARTING:
-		update_debug_pc_event(CPU_HP_STARTING, cpu,
-				cluster->num_children_in_sync.bits[0],
-				cluster->child_cpus.bits[0], false);
 		cluster_unprepare(cluster, get_cpu_mask((unsigned int) cpu),
 					NR_LPM_LEVELS, false, 0);
 		break;
@@ -691,7 +703,7 @@ static int cpu_power_select(struct cpuidle_device *dev,
 	if (!cpu)
 		return -EINVAL;
 
-	if (sleep_disabled && !cpu_isolated(dev->cpu))
+	if (sleep_disabled)
 		return 0;
 
 	idx_restrict = cpu->nlevels + 1;
@@ -803,7 +815,7 @@ static uint64_t get_cluster_sleep_time(struct lpm_cluster *cluster,
 		if (!suspend_wake_time)
 			return ~0ULL;
 		else
-			return USEC_PER_MSEC * suspend_wake_time;
+			return USEC_PER_SEC * suspend_wake_time;
 	}
 
 	cpumask_and(&online_cpus_in_cluster,
@@ -1132,8 +1144,6 @@ static int cluster_configure(struct lpm_cluster *cluster, int idx,
 		struct cpumask nextcpu, *cpumask;
 		uint64_t us;
 		uint32_t pred_us;
-		uint64_t sec;
-		uint64_t nsec;
 
 		us = get_cluster_sleep_time(cluster, &nextcpu,
 						from_idle, &pred_us);
@@ -1145,20 +1155,11 @@ static int cluster_configure(struct lpm_cluster *cluster, int idx,
 			goto failed_set_mode;
 		}
 
+		us = (us + 1) * 1000;
 		clear_predict_history();
 		clear_cl_predict_history();
 
-		us = us + 1;
-		sec = us;
-		do_div(sec, USEC_PER_SEC);
-		nsec = us - sec * USEC_PER_SEC;
-
-		sec = sec * SCLK_HZ;
-		if (nsec > 0) {
-			nsec = nsec * NSEC_PER_USEC;
-			do_div(nsec, NSEC_PER_SEC/SCLK_HZ);
-		}
-		us = sec + nsec;
+		do_div(us, NSEC_PER_SEC/SCLK_HZ);
 		msm_mpm_enter_sleep(us, from_idle, cpumask);
 	}
 
@@ -1432,15 +1433,57 @@ unlock_and_return:
 	return state_id;
 }
 
+#ifdef CONFIG_HTC_POWER_DEBUG
+static char *gpio_sleep_status_info;
+
+int print_gpio_buffer(struct seq_file *m)
+{
+	if (gpio_sleep_status_info)
+		seq_printf(m, gpio_sleep_status_info);
+	else
+		seq_printf(m, "Device haven't suspended yet!\n");
+	return 0;
+}
+EXPORT_SYMBOL(print_gpio_buffer);
+
+int free_gpio_buffer(void)
+{
+	kfree(gpio_sleep_status_info);
+	gpio_sleep_status_info = NULL;
+
+	return 0;
+}
+EXPORT_SYMBOL(free_gpio_buffer);
+#endif
+
 #if !defined(CONFIG_CPU_V7)
+asmlinkage int __invoke_psci_fn_smc(u64, u64, u64, u64);
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+bool psci_enter_sleep(struct lpm_cluster *cluster, int idx, bool from_idle, bool notify_rpm)
+{
+	int cpu;
+#else
 bool psci_enter_sleep(struct lpm_cluster *cluster, int idx, bool from_idle)
 {
+#endif
+#ifdef CONFIG_HTC_POWER_DEBUG
+	int curr_len = 0;
+	int64_t time;
+#endif
 	/*
 	 * idx = 0 is the default LPM state
 	 */
 	if (!idx) {
 		stop_critical_timings();
+#ifdef CONFIG_HTC_POWER_DEBUG
+		time = sched_clock();
 		wfi();
+		time = sched_clock() - time;
+		do_div(time,1000);
+		htc_idle_stat_add(idx, (u32)time);
+#else
+		wfi();
+#endif
 		start_critical_timings();
 		return 1;
 	} else {
@@ -1456,7 +1499,6 @@ bool psci_enter_sleep(struct lpm_cluster *cluster, int idx, bool from_idle)
 			start_critical_timings();
 			return 1;
 		}
-
 		affinity_level = PSCI_AFFINITY_LEVEL(affinity_level);
 		state_id |= (power_state | affinity_level
 			| cluster->cpu->levels[idx].psci_id);
@@ -1464,7 +1506,60 @@ bool psci_enter_sleep(struct lpm_cluster *cluster, int idx, bool from_idle)
 		update_debug_pc_event(CPU_ENTER, state_id,
 						0xdeaffeed, 0xdeaffeed, true);
 		stop_critical_timings();
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+		if(!from_idle) {
+			if (HTC_PM_DEBUG_GPIO & htc_pm_debug_mask) {
+				if (gpio_sleep_status_info) {
+					memset(gpio_sleep_status_info, 0,
+						sizeof(*gpio_sleep_status_info));
+				} else {
+					gpio_sleep_status_info = kmalloc(25000, GFP_ATOMIC);
+					if (!gpio_sleep_status_info) {
+						pr_err("[PM] kmalloc memory failed in %s\n",
+							__func__);
+					}
+				}
+				curr_len = msm_dump_gpios(NULL, curr_len,
+							gpio_sleep_status_info);
+				curr_len = qpnp_pin_dump(NULL, curr_len,
+							gpio_sleep_status_info);
+				curr_len = msm_dump_sdc(NULL, curr_len,
+							gpio_sleep_status_info);
+				pr_info("The HTC_PM_DEBUG_GPIO turn on");
+			}
+			pr_info("[R] suspend end\n");
+		}
+#endif
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+		cpu = smp_processor_id();
+		init_cpu_foot_print(cpu, from_idle, notify_rpm);
+		set_cpu_foot_print(cpu, 0x0);
+#endif
+#ifdef CONFIG_HTC_POWER_DEBUG
+		time = sched_clock();
 		success = !arm_cpuidle_suspend(state_id);
+		time = sched_clock() - time;
+#else
+		success = !arm_cpuidle_suspend(state_id);
+#endif
+
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+		if (success == true) {
+			set_cpu_foot_print(cpu, 0xb);
+			inc_kernel_exit_counter_from_pc(cpu);
+		} else
+			set_cpu_foot_print(cpu, 0xfa);
+#endif
+#ifdef CONFIG_HTC_POWER_DEBUG
+		if(!from_idle){
+			pr_info("[R] resume start\n");
+		}
+		else {
+			do_div(time,1000);
+			htc_idle_stat_add(idx, (u32)time);
+		}
+#endif
 		start_critical_timings();
 		update_debug_pc_event(CPU_EXIT, state_id,
 						success, 0xdeaffeed, true);
@@ -1562,6 +1657,9 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 		struct cpuidle_driver *drv, int idx)
 {
 	struct lpm_cluster *cluster = per_cpu(cpu_cluster, dev->cpu);
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	struct lpm_cpu_level *level;
+#endif
 	bool success = false;
 	const struct cpumask *cpumask = get_cpu_mask(dev->cpu);
 	int64_t start_time = ktime_to_ns(ktime_get()), end_time;
@@ -1570,6 +1668,9 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 	if (idx < 0)
 		return -EINVAL;
 
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	level = &cluster->cpu->levels[idx];
+#endif
 	pwr_params = &cluster->cpu->levels[idx].pwr;
 	sched_set_cpu_cstate(smp_processor_id(), idx + 1,
 		pwr_params->energy_overhead, pwr_params->latency_us);
@@ -1586,7 +1687,14 @@ static int lpm_cpuidle_enter(struct cpuidle_device *dev,
 		goto exit;
 
 	BUG_ON(!use_psci);
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	if (level->mode == MSM_PM_SLEEP_MODE_POWER_COLLAPSE)
+		success = psci_enter_sleep(cluster, idx, true, true);
+	else
+		success = psci_enter_sleep(cluster, idx, true, false);
+#else
 	success = psci_enter_sleep(cluster, idx, true);
+#endif
 
 exit:
 	end_time = ktime_to_ns(ktime_get());
@@ -1832,8 +1940,16 @@ static int lpm_suspend_enter(suspend_state_t state)
 	clock_debug_print_enabled();
 
 	BUG_ON(!use_psci);
-	psci_enter_sleep(cluster, idx, true);
 
+#ifdef CONFIG_HTC_DEBUG_FOOTPRINT
+	psci_enter_sleep(cluster, idx, false, true);
+#else
+#ifdef CONFIG_HTC_POWER_DEBUG
+	psci_enter_sleep(cluster, idx, false);
+#else
+	psci_enter_sleep(cluster, idx, true);
+#endif
+#endif
 	if (idx > 0)
 		update_debug_pc_event(CPU_EXIT, idx, true, 0xdeaffeed,
 					false);
@@ -1855,7 +1971,6 @@ static int lpm_probe(struct platform_device *pdev)
 	int ret;
 	int size;
 	struct kobject *module_kobj = NULL;
-	struct md_region md_entry;
 
 	get_online_cpus();
 	lpm_root_node = lpm_of_parse_cluster(pdev);
@@ -1915,14 +2030,6 @@ static int lpm_probe(struct platform_device *pdev)
 				__func__);
 		goto failed;
 	}
-
-	/* Add lpm_debug to Minidump*/
-	strlcpy(md_entry.name, "KLPMDEBUG", sizeof(md_entry.name));
-	md_entry.virt_addr = (uintptr_t)lpm_debug;
-	md_entry.phys_addr = lpm_debug_phys;
-	md_entry.size = size;
-	if (msm_minidump_add_region(&md_entry))
-		pr_info("Failed to add lpm_debug in Minidump\n");
 
 	return 0;
 failed:

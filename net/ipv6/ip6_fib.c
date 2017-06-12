@@ -903,8 +903,6 @@ add:
 			ins = &rt->dst.rt6_next;
 			iter = *ins;
 			while (iter) {
-				if (iter->rt6i_metric > rt->rt6i_metric)
-					break;
 				if (rt6_qualify_for_ecmp(iter)) {
 					*ins = iter->dst.rt6_next;
 					fib6_purge_rt(iter, fn, info->nl_net);
@@ -1749,6 +1747,9 @@ static int fib6_age(struct rt6_info *rt, void *arg)
 	if (rt->rt6i_flags & RTF_EXPIRES && rt->dst.expires) {
 		if (time_after(now, rt->dst.expires)) {
 			RT6_TRACE("expiring %p\n", rt);
+#ifdef CONFIG_HTC_NETWORK_MODIFY
+			pr_info("[NET]%s: expiring %p\n", __func__, rt);
+#endif
 			return -1;
 		}
 		gc_args.more++;

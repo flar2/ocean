@@ -10,6 +10,8 @@
  * GNU General Public License for more details.
  */
 
+#include "dsi-panel-sim-video.dtsi"
+#include "dsi-panel-sim-dualmipi-video.dtsi"
 #include "dsi-panel-nt35597-dualmipi-wqxga-video.dtsi"
 #include "dsi-panel-nt35597-dualmipi-wqxga-cmd.dtsi"
 #include "dsi-panel-nt35597-truly-dualmipi-wqxga-video.dtsi"
@@ -89,10 +91,6 @@
 	qcom,cmd-sync-wait-broadcast;
 	qcom,esd-check-enabled;
 	qcom,mdss-dsi-panel-status-check-mode = "bta_check";
-	qcom,mdss-dsi-min-refresh-rate = <55>;
-	qcom,mdss-dsi-max-refresh-rate = <60>;
-	qcom,mdss-dsi-pan-enable-dynamic-fps;
-	qcom,mdss-dsi-pan-fps-update = "dfps_immediate_porch_mode_vfp";
 };
 
 &dsi_dual_nt35597_cmd {
@@ -128,10 +126,6 @@
 	qcom,mdss-dsi-panel-on-check-value = <0x9c>;
 	qcom,mdss-dsi-panel-status-read-length = <1>;
 	qcom,mdss-dsi-panel-max-error-count = <3>;
-	qcom,mdss-dsi-min-refresh-rate = <55>;
-	qcom,mdss-dsi-max-refresh-rate = <60>;
-	qcom,mdss-dsi-pan-enable-dynamic-fps;
-	qcom,mdss-dsi-pan-fps-update = "dfps_immediate_porch_mode_vfp";
 };
 
 &dsi_nt35597_dsc_cmd {

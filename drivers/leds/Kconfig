@@ -266,6 +266,16 @@ config LEDS_LP5562
 	  Driver provides direct control via LED class and interface for
 	  programming the engines.
 
+config LEDS_LP5562_HTC
+	tristate "LED Support for N.S. LP5562 LED driver chip"
+	depends on LEDS_CLASS && I2C
+	select LEDS_LP55XX_COMMON
+	help
+	  If you say yes here you get support for the National Semiconductor
+	  LP5562 LED driver. It is 3 channel chip with programmable engines.
+	  Driver provides direct control via LED class and interface for
+	  programming the engines.
+
 config LEDS_LP8501
 	tristate "LED Support for TI LP8501 LED driver chip"
 	depends on LEDS_CLASS && I2C
@@ -598,7 +608,7 @@ config LEDS_QPNP
 
 config LEDS_QPNP_FLASH_V2
 	tristate "Support for QPNP V2 Flash LEDs"
-	depends on LEDS_CLASS && MFD_SPMI_PMIC
+	depends on LEDS_CLASS && MFD_SPMI_PMIC && !LEDS_QPNP_FLASH
 	help
 	  This driver supports the flash V2 LED functionality of Qualcomm
 	  Technologies, Inc. QPNP PMICs.  This driver supports PMICs starting

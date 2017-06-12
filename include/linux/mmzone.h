@@ -376,10 +376,10 @@ struct zone {
 	struct per_cpu_pageset __percpu *pageset;
 
 	/*
-	 * This is a per-zone reserve of pages that are not available
-	 * to userspace allocations.
+	 * This is a per-zone reserve of pages that should not be
+	 * considered dirtyable memory.
 	 */
-	unsigned long		totalreserve_pages;
+	unsigned long		dirty_balance_reserve;
 #ifdef CONFIG_CMA
 	bool			cma_alloc;
 #endif
@@ -852,6 +852,9 @@ static inline int is_highmem(struct zone *zone)
 
 /* These two functions are used to setup the per zone pages min values */
 struct ctl_table;
+extern int vm_inactive_ratio;
+int vm_inactive_ratio_handler(struct ctl_table *, int,
+	void __user *, size_t *, loff_t *);
 int min_free_kbytes_sysctl_handler(struct ctl_table *, int,
 					void __user *, size_t *, loff_t *);
 extern int sysctl_lowmem_reserve_ratio[MAX_NR_ZONES-1];

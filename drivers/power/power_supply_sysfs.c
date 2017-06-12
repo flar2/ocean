@@ -83,6 +83,11 @@ static ssize_t power_supply_show_property(struct device *dev,
 	static char *typec_pr_text[] = {
 		"none", "dual power role", "sink", "source"
 	};
+#ifdef CONFIG_HTC_BATT
+	static char *ext_otg_chg_control[] = {
+		"disable", "enable"
+	};
+#endif // CONFIG_HTC_BATT
 	ssize_t ret = 0;
 	struct power_supply *psy = dev_get_drvdata(dev);
 	const ptrdiff_t off = attr - power_supply_attrs;
@@ -114,8 +119,7 @@ static ssize_t power_supply_show_property(struct device *dev,
 		return sprintf(buf, "%s\n", technology_text[value.intval]);
 	else if (off == POWER_SUPPLY_PROP_CAPACITY_LEVEL)
 		return sprintf(buf, "%s\n", capacity_level_text[value.intval]);
-	else if (off == POWER_SUPPLY_PROP_TYPE ||
-			off == POWER_SUPPLY_PROP_REAL_TYPE)
+	else if (off == POWER_SUPPLY_PROP_TYPE)
 		return sprintf(buf, "%s\n", type_text[value.intval]);
 	else if (off == POWER_SUPPLY_PROP_SCOPE)
 		return sprintf(buf, "%s\n", scope_text[value.intval]);
@@ -127,6 +131,10 @@ static ssize_t power_supply_show_property(struct device *dev,
 		return sprintf(buf, "%s\n", health_text[value.intval]);
 	else if (off == POWER_SUPPLY_PROP_CONNECTOR_HEALTH)
 		return sprintf(buf, "%s\n", health_text[value.intval]);
+#ifdef CONFIG_HTC_BATT
+	else if (off == POWER_SUPPLY_PROP_EXT_OTG_CHG_CONTROL)
+		return sprintf(buf, "%s\n", ext_otg_chg_control[value.intval]);
+#endif // CONFIG_HTC_BATT
 	else if (off >= POWER_SUPPLY_PROP_MODEL_NAME)
 		return sprintf(buf, "%s\n", value.strval);
 
@@ -265,7 +273,6 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(dp_dm),
 	POWER_SUPPLY_ATTR(input_current_limited),
 	POWER_SUPPLY_ATTR(input_current_now),
-	POWER_SUPPLY_ATTR(charge_qnovo_enable),
 	POWER_SUPPLY_ATTR(current_qnovo),
 	POWER_SUPPLY_ATTR(voltage_qnovo),
 	POWER_SUPPLY_ATTR(rerun_aicl),
@@ -288,15 +295,19 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(set_ship_mode),
 	POWER_SUPPLY_ATTR(soc_reporting_ready),
 	POWER_SUPPLY_ATTR(debug_battery),
+#ifdef CONFIG_HTC_BATT
+	POWER_SUPPLY_ATTR(usb_conn_temp),
+	POWER_SUPPLY_ATTR(ext_otg_chg_control),
+	POWER_SUPPLY_ATTR(htcchg_gpio_open),
+	POWER_SUPPLY_ATTR(htc_charge_now),
+	POWER_SUPPLY_ATTR(htc_charge_now_raw),
+#endif //CONFIG_HTC_BATT
 	POWER_SUPPLY_ATTR(fcc_delta),
 	POWER_SUPPLY_ATTR(icl_reduction),
 	POWER_SUPPLY_ATTR(parallel_mode),
 	POWER_SUPPLY_ATTR(die_health),
 	POWER_SUPPLY_ATTR(connector_health),
 	POWER_SUPPLY_ATTR(ctm_current_max),
-	POWER_SUPPLY_ATTR(hw_current_max),
-	POWER_SUPPLY_ATTR(real_type),
-	POWER_SUPPLY_ATTR(pr_swap),
 	/* Local extensions of type int64_t */
 	POWER_SUPPLY_ATTR(charge_counter_ext),
 	/* Properties of type `const char *' */

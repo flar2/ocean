@@ -655,8 +655,9 @@ int qmi_filter_notify_send(struct ipa_fltr_installed_notif_req_msg_v01 *req)
 
 	/* check if the filter rules from IPACM is valid */
 	if (req->filter_index_list_len == 0) {
-		IPAWANDBG(" delete UL filter rule for pipe %d\n",
+		IPAWANERR(" delete UL filter rule for pipe %d\n",
 		req->source_pipe_index);
+		return -EINVAL;
 	} else if (req->filter_index_list_len > QMI_IPA_MAX_FILTERS_V01) {
 		IPAWANERR(" UL filter rule for pipe %d exceed max (%u)\n",
 		req->source_pipe_index,

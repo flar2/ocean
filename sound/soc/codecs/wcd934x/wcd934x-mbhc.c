@@ -33,7 +33,13 @@
 #include "wcd934x-mbhc.h"
 #include "../wcdcal-hwdep.h"
 
+/* HTC_AUD_START - disable impedance sense */
+#if 0
 #define TAVIL_ZDET_SUPPORTED          true
+#else
+#define TAVIL_ZDET_SUPPORTED          false
+#endif
+/* HTC_AUD_END */
 /* Z value defined in milliohm */
 #define TAVIL_ZDET_VAL_32             32000
 #define TAVIL_ZDET_VAL_400            400000
@@ -1074,3 +1080,17 @@ void tavil_mbhc_deinit(struct snd_soc_codec *codec)
 	}
 }
 EXPORT_SYMBOL(tavil_mbhc_deinit);
+
+/* HTC_AUD_START - AS HS 2.0 */
+int tavil_mbhc_get_hs_type(struct wcd934x_mbhc *wcd934x_mbhc)
+{
+	if (wcd934x_mbhc) {
+		pr_info("%s: current_plug = %u\n", __func__, wcd934x_mbhc->wcd_mbhc.current_plug);
+		return (int)wcd934x_mbhc->wcd_mbhc.current_plug;
+	} else {
+		pr_err("%s: wcd934x_mbhc is null\n", __func__);
+		return -EINVAL;
+	}
+}
+EXPORT_SYMBOL(tavil_mbhc_get_hs_type);
+/* HTC_AUD_END */

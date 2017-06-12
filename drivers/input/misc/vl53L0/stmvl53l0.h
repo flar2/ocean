@@ -131,7 +131,6 @@ struct stmvl53l0_data {
 	struct miscdevice miscdev;
 
 	int irq;
-	int irq_gpio;
 	unsigned int reset;
 
 	/* control flag from HAL */
@@ -208,7 +207,6 @@ struct stmvl53l0_module_fn_t {
 	void (*deinit)(void *);
 	int (*power_up)(void *, unsigned int *);
 	int (*power_down)(void *);
-	int (*query_power_status)(void *);
 };
 
 

@@ -45,13 +45,6 @@ struct sde_smmu_domain {
 	unsigned long size;
 };
 
-#ifndef CONFIG_FB_MSM_MDSS
-int mdss_smmu_request_mappings(msm_smmu_handler_t callback)
-{
-	return 0;
-}
-#endif
-
 int sde_smmu_set_dma_direction(int dir)
 {
 	struct sde_rot_data_type *mdata = sde_rot_get_mdata();
@@ -551,18 +544,11 @@ static int sde_smmu_fault_handler(struct iommu_domain *domain,
 
 	sde_smmu = (struct sde_smmu_client *)token;
 
-	/* trigger rotator dump */
-	SDEROT_ERR("trigger rotator dump, iova=0x%08lx, flags=0x%x\n",
-			iova, flags);
-	SDEROT_ERR("SMMU device:%s", sde_smmu->dev->kobj.name);
+	/* trigger rotator panic and dump */
+	SDEROT_ERR("trigger rotator panic and dump, iova=0x%08lx\n", iova);
 
-	/* generate dump, but no panic */
-	sde_rot_evtlog_tout_handler(false, __func__, "rot", "vbif_dbg_bus");
+	sde_rot_dump_panic();
 
-	/*
-	 * return -ENOSYS to allow smmu driver to dump out useful
-	 * debug info.
-	 */
 	return rc;
 }
 

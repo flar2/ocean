@@ -533,23 +533,9 @@ static ssize_t sockfs_listxattr(struct dentry *dentry, char *buffer,
 	return used;
 }
 
-static int sockfs_setattr(struct dentry *dentry, struct iattr *iattr)
-{
-	int err = simple_setattr(dentry, iattr);
-
-	if (!err && (iattr->ia_valid & ATTR_UID)) {
-		struct socket *sock = SOCKET_I(d_inode(dentry));
-
-		sock->sk->sk_uid = iattr->ia_uid;
-	}
-
-	return err;
-}
-
 static const struct inode_operations sockfs_inode_ops = {
 	.getxattr = sockfs_getxattr,
 	.listxattr = sockfs_listxattr,
-	.setattr = sockfs_setattr,
 };
 
 /**
@@ -590,9 +576,21 @@ static struct socket *sock_alloc(void)
  *	callback, and the inode is then released if the socket is bound to
  *	an inode not a file.
  */
+/* +SSD_RIL: Garbage_Filter */
+#ifdef CONFIG_HTC_GARBAGE_FILTER
+extern int add_or_remove_port(struct sock *sk, int add_or_remove);
+#endif
+/* -SSD_RIL: Garbage_Filter */
 
 void sock_release(struct socket *sock)
 {
+	/* ++SSD_RIL: Garbage_Filter */
+#ifdef CONFIG_HTC_GARBAGE_FILTER
+	if (sock->sk != NULL && (sock->sk->sk_protocol == IPPROTO_TCP || sock->sk->sk_protocol == IPPROTO_UDP))
+		add_or_remove_port(sock->sk, 0);
+#endif
+	/* --SSD_RIL: Garbage_Filter */
+
 	if (sock->ops) {
 		struct module *owner = sock->ops->owner;
 
@@ -1450,6 +1448,13 @@ SYSCALL_DEFINE2(listen, int, fd, int, backlog)
 				sock_put(sock->sk);
 		}
 		fput_light(sock->file, fput_needed);
+
+		/* ++SSD_RIL: Garbage_Filter */
+#ifdef CONFIG_HTC_GARBAGE_FILTER
+		if (sock->sk != NULL && (sock->sk->sk_protocol == IPPROTO_TCP || sock->sk->sk_protocol == IPPROTO_UDP))
+			add_or_remove_port(sock->sk, 1);
+#endif
+		/* --SSD_RIL: Garbage_Filter */
 	}
 	return err;
 }
@@ -2101,8 +2106,6 @@ int __sys_sendmmsg(int fd, struct mmsghdr __user *mmsg, unsigned int vlen,
 		if (err)
 			break;
 		++datagrams;
-		if (msg_data_left(&msg_sys))
-			break;
 	}
 
 	fput_light(sock->file, fput_needed);
@@ -2245,10 +2248,8 @@ int __sys_recvmmsg(int fd, struct mmsghdr __user *mmsg, unsigned int vlen,
 		return err;
 
 	err = sock_error(sock->sk);
-	if (err) {
-		datagrams = err;
+	if (err)
 		goto out_put;
-	}
 
 	entry = mmsg;
 	compat_entry = (struct compat_mmsghdr __user *)mmsg;

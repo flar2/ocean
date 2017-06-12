@@ -218,7 +218,7 @@ int snd_usb_init_pitch(struct snd_usb_audio *chip, int iface,
 	}
 }
 
-static int start_endpoints(struct snd_usb_substream *subs)
+static int start_endpoints(struct snd_usb_substream *subs, bool can_sleep)
 {
 	int err;
 
@@ -231,7 +231,7 @@ static int start_endpoints(struct snd_usb_substream *subs)
 		dev_dbg(&subs->dev->dev, "Starting data EP @%pK\n", ep);
 
 		ep->data_subs = subs;
-		err = snd_usb_endpoint_start(ep);
+		err = snd_usb_endpoint_start(ep, can_sleep);
 		if (err < 0) {
 			clear_bit(SUBSTREAM_FLAG_DATA_EP_STARTED, &subs->flags);
 			return err;
@@ -260,7 +260,7 @@ static int start_endpoints(struct snd_usb_substream *subs)
 		dev_dbg(&subs->dev->dev, "Starting sync EP @%pK\n", ep);
 
 		ep->sync_slave = subs->data_endpoint;
-		err = snd_usb_endpoint_start(ep);
+		err = snd_usb_endpoint_start(ep, can_sleep);
 		if (err < 0) {
 			clear_bit(SUBSTREAM_FLAG_SYNC_EP_STARTED, &subs->flags);
 			return err;
@@ -593,6 +593,14 @@ int snd_usb_enable_audio_stream(struct snd_usb_substream *subs,
 			return ret;
 
 		iface = usb_ifnum_to_if(subs->dev, subs->cur_audiofmt->iface);
+
+/* HTC_AUD_START Fix Klockwork */
+		if (iface == NULL) {
+			dev_err(&subs->dev->dev, "interface is NULL\n");
+			return -EINVAL;
+		}
+/* HTC_AUD_END */
+
 		alts = &iface->altsetting[subs->cur_audiofmt->altset_idx];
 		ret = snd_usb_init_sample_rate(subs->stream->chip,
 					       subs->cur_audiofmt->iface,
@@ -897,7 +905,7 @@ static int snd_usb_pcm_prepare(struct snd_pcm_substream *substream)
 	/* for playback, submit the URBs now; otherwise, the first hwptr_done
 	 * updates for all URBs would happen at the same time when starting */
 	if (subs->direction == SNDRV_PCM_STREAM_PLAYBACK)
-		ret = start_endpoints(subs);
+		ret = start_endpoints(subs, true);
 
  unlock:
 	snd_usb_unlock_shutdown(subs->stream->chip);
@@ -1713,7 +1721,7 @@ static int snd_usb_substream_capture_trigger(struct snd_pcm_substream *substream
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
-		err = start_endpoints(subs);
+		err = start_endpoints(subs, false);
 		if (err < 0)
 			return err;
 

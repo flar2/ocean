@@ -857,8 +857,6 @@ static int ipa3_reset_with_open_aggr_frame_wa(u32 clnt_hdl,
 	struct gsi_xfer_elem xfer_elem;
 	int i;
 	int aggr_active_bitmap = 0;
-	bool pipe_suspended = false;
-	struct ipa_ep_cfg_ctrl ctrl;
 
 	IPADBG("Applying reset channel with open aggregation frame WA\n");
 	ipahal_write_reg(IPA_AGGR_FORCE_CLOSE, (1 << clnt_hdl));
@@ -884,15 +882,6 @@ static int ipa3_reset_with_open_aggr_frame_wa(u32 clnt_hdl,
 		&chan_dma);
 	if (result)
 		return -EFAULT;
-
-	ipahal_read_reg_n_fields(IPA_ENDP_INIT_CTRL_n, clnt_hdl, &ctrl);
-	if (ctrl.ipa_ep_suspend) {
-		IPADBG("pipe is suspended, remove suspend\n");
-		pipe_suspended = true;
-		ctrl.ipa_ep_suspend = false;
-		ipahal_write_reg_n_fields(IPA_ENDP_INIT_CTRL_n,
-			clnt_hdl, &ctrl);
-	}
 
 	/* Start channel and put 1 Byte descriptor on it */
 	gsi_res = gsi_start_channel(ep->gsi_chan_hdl);
@@ -953,13 +942,6 @@ static int ipa3_reset_with_open_aggr_frame_wa(u32 clnt_hdl,
 	 */
 	msleep(IPA_POLL_AGGR_STATE_SLEEP_MSEC);
 
-	if (pipe_suspended) {
-		IPADBG("suspend the pipe again\n");
-		ctrl.ipa_ep_suspend = true;
-		ipahal_write_reg_n_fields(IPA_ENDP_INIT_CTRL_n,
-			clnt_hdl, &ctrl);
-	}
-
 	/* Restore channels properties */
 	result = ipa3_restore_channel_properties(ep, &orig_chan_props,
 		&orig_chan_scratch);
@@ -974,12 +956,6 @@ queue_xfer_fail:
 	ipa3_stop_gsi_channel(clnt_hdl);
 	dma_free_coherent(ipa3_ctx->pdev, 1, buff, dma_addr);
 start_chan_fail:
-	if (pipe_suspended) {
-		IPADBG("suspend the pipe again\n");
-		ctrl.ipa_ep_suspend = true;
-		ipahal_write_reg_n_fields(IPA_ENDP_INIT_CTRL_n,
-			clnt_hdl, &ctrl);
-	}
 	ipa3_restore_channel_properties(ep, &orig_chan_props,
 		&orig_chan_scratch);
 restore_props_fail:
@@ -1255,7 +1231,8 @@ int ipa3_request_gsi_channel(struct ipa_request_gsi_channel_params *params,
 	memset(gsi_ep_cfg_ptr, 0, sizeof(struct ipa_gsi_ep_config));
 	gsi_ep_cfg_ptr = ipa_get_gsi_ep_info(ipa_ep_idx);
 	params->chan_params.evt_ring_hdl = ep->gsi_evt_ring_hdl;
-	params->chan_params.ch_id = gsi_ep_cfg_ptr->ipa_gsi_chan_num;
+	if(gsi_ep_cfg_ptr)
+		params->chan_params.ch_id = gsi_ep_cfg_ptr->ipa_gsi_chan_num;
 	gsi_res = gsi_alloc_channel(&params->chan_params, gsi_dev_hdl,
 		&ep->gsi_chan_hdl);
 	if (gsi_res != GSI_STATUS_SUCCESS) {
@@ -1267,8 +1244,9 @@ int ipa3_request_gsi_channel(struct ipa_request_gsi_channel_params *params,
 
 	memcpy(&ep->chan_scratch, &params->chan_scratch,
 		sizeof(union __packed gsi_channel_scratch));
-	ep->chan_scratch.xdci.max_outstanding_tre =
-		params->chan_params.re_size * gsi_ep_cfg_ptr->ipa_if_tlv;
+	if(gsi_ep_cfg_ptr)
+		ep->chan_scratch.xdci.max_outstanding_tre =
+			params->chan_params.re_size * gsi_ep_cfg_ptr->ipa_if_tlv;
 	gsi_res = gsi_write_channel_scratch(ep->gsi_chan_hdl,
 		params->chan_scratch);
 	if (gsi_res != GSI_STATUS_SUCCESS) {
@@ -1801,8 +1779,7 @@ dealloc_chan_fail:
 int ipa3_xdci_suspend(u32 ul_clnt_hdl, u32 dl_clnt_hdl,
 	bool should_force_clear, u32 qmi_req_id, bool is_dpl)
 {
-	struct ipa3_ep_context *ul_ep = NULL;
-	struct ipa3_ep_context *dl_ep;
+	struct ipa3_ep_context *ul_ep, *dl_ep;
 	int result = -EFAULT;
 	u32 source_pipe_bitmask = 0;
 	bool dl_data_pending = true;

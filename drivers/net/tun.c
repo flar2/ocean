@@ -862,7 +862,10 @@ static netdev_tx_t tun_net_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (unlikely(skb_orphan_frags(skb, GFP_ATOMIC)))
 		goto drop;
 
-	skb_tx_timestamp(skb);
+	if (skb->sk && sk_fullsock(skb->sk)) {
+		sock_tx_timestamp(skb->sk, &skb_shinfo(skb)->tx_flags);
+		sw_tx_timestamp(skb);
+	}
 
 	/* Orphan the skb - required as we might hang on to it
 	 * for indefinite time.
@@ -1105,11 +1108,9 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 	}
 
 	if (tun->flags & IFF_VNET_HDR) {
-		int vnet_hdr_sz = READ_ONCE(tun->vnet_hdr_sz);
-
-		if (len < vnet_hdr_sz)
+		if (len < tun->vnet_hdr_sz)
 			return -EINVAL;
-		len -= vnet_hdr_sz;
+		len -= tun->vnet_hdr_sz;
 
 		n = copy_from_iter(&gso, sizeof(gso), from);
 		if (n != sizeof(gso))
@@ -1121,7 +1122,7 @@ static ssize_t tun_get_user(struct tun_struct *tun, struct tun_file *tfile,
 
 		if (tun16_to_cpu(tun, gso.hdr_len) > len)
 			return -EINVAL;
-		iov_iter_advance(from, vnet_hdr_sz - sizeof(gso));
+		iov_iter_advance(from, tun->vnet_hdr_sz - sizeof(gso));
 	}
 
 	if ((tun->flags & TUN_TYPE_MASK) == IFF_TAP) {
@@ -1304,7 +1305,7 @@ static ssize_t tun_put_user(struct tun_struct *tun,
 		vlan_hlen = VLAN_HLEN;
 
 	if (tun->flags & IFF_VNET_HDR)
-		vnet_hdr_sz = READ_ONCE(tun->vnet_hdr_sz);
+		vnet_hdr_sz = tun->vnet_hdr_sz;
 
 	total = skb->len + vlan_hlen + vnet_hdr_sz;
 

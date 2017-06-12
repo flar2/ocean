@@ -3180,6 +3180,15 @@ static int select_best_cpu(struct task_struct *p, int target, int reason,
 
 	rcu_read_lock();
 
+	if (sync) {
+		unsigned cpuid = cpu;
+		if (cpumask_test_cpu(cpuid, tsk_cpus_allowed(p)) &&
+			!cpumask_test_cpu(cpuid,  cpu_isolated_mask)) {
+			target = cpuid;
+			goto out;
+		}
+	}
+
 	grp = task_related_thread_group(p);
 
 	if (grp && grp->preferred_cluster) {
@@ -3844,10 +3853,6 @@ static inline int update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 	cfs_rq->load_last_update_time_copy = sa->last_update_time;
 #endif
 
-	/* Trace CPU load, unless cfs_rq belongs to a non-root task_group */
-	if (cfs_rq == &rq_of(cfs_rq)->cfs)
-		trace_sched_load_avg_cpu(cpu_of(rq_of(cfs_rq)), cfs_rq);
-
 	return decayed || removed;
 }
 
@@ -3871,6 +3876,7 @@ static inline void update_load_avg(struct sched_entity *se, int update_tg)
 
 	if (entity_is_task(se))
 		trace_sched_load_avg_task(task_of(se), &se->avg);
+	trace_sched_load_avg_cpu(cpu, cfs_rq);
 }
 
 static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -6060,7 +6066,7 @@ long group_norm_util(struct energy_env *eenv, struct sched_group *sg)
 }
 
 static int find_new_capacity(struct energy_env *eenv,
-	const struct sched_group_energy * const sge)
+	const struct sched_group_energy const *sge)
 {
 	int idx;
 	unsigned long util = group_max_util(eenv);
@@ -6848,19 +6854,17 @@ static inline int find_best_target(struct task_struct *p, bool boosted, bool pre
 
 		if (new_util < cur_capacity) {
 			if (cpu_rq(i)->nr_running) {
-				if (prefer_idle) {
-					/* Find a target cpu with highest
-					 * utilization.
-					 */
+				if(prefer_idle) {
+					// Find a target cpu with lowest
+					// utilization.
 					if (target_util == 0 ||
 						target_util < new_util) {
 						target_cpu = i;
 						target_util = new_util;
 					}
 				} else {
-					/* Find a target cpu with lowest
-					 * utilization.
-					 */
+					// Find a target cpu with highest
+					// utilization.
 					if (target_util == 0 ||
 						target_util > new_util) {
 						target_cpu = i;
@@ -8387,8 +8391,7 @@ static void update_cpu_capacity(struct sched_domain *sd, int cpu)
 		mcc->cpu = cpu;
 #ifdef CONFIG_SCHED_DEBUG
 		raw_spin_unlock_irqrestore(&mcc->lock, flags);
-		printk_deferred(KERN_INFO "CPU%d: update max cpu_capacity %lu\n",
-				cpu, capacity);
+		pr_info("CPU%d: update max cpu_capacity %lu\n", cpu, capacity);
 		goto skip_unlock;
 #endif
 	}

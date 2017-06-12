@@ -46,6 +46,7 @@
 
 #define kgsl_drawobj_profiling_buffer kgsl_cmdbatch_profiling_buffer
 
+#include "kgsl_htc.h"
 
 /* The number of memstore arrays limits the number of contexts allowed.
  * If more contexts are needed, update multiple for MEMSTORE_SIZE
@@ -152,6 +153,7 @@ struct kgsl_driver {
 	unsigned int full_cache_threshold;
 	struct workqueue_struct *workqueue;
 	struct workqueue_struct *mem_workqueue;
+	struct kgsl_driver_htc_priv priv;
 };
 
 extern struct kgsl_driver kgsl_driver;
@@ -224,6 +226,7 @@ struct kgsl_memdesc {
 	struct page **pages;
 	unsigned int page_count;
 	unsigned int cur_bindings;
+	struct kgsl_process_private *private;
 };
 
 /*
@@ -234,6 +237,7 @@ struct kgsl_memdesc {
 #define KGSL_MEM_ENTRY_KERNEL 0
 #define KGSL_MEM_ENTRY_USER (KGSL_USER_MEM_TYPE_ADDR + 1)
 #define KGSL_MEM_ENTRY_ION (KGSL_USER_MEM_TYPE_ION + 1)
+#define KGSL_MEM_ENTRY_PAGE_ALLOC (KGSL_USER_MEM_TYPE_ION + 2)
 #define KGSL_MEM_ENTRY_MAX (KGSL_USER_MEM_TYPE_MAX + 1)
 
 /* symbolic table for trace and debugfs */

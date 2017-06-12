@@ -375,7 +375,6 @@ retry:
 out_free_pages:
 	for (i = 0; i < bp->b_page_count; i++)
 		__free_page(bp->b_pages[i]);
-	bp->b_flags &= ~_XBF_PAGES;
 	return error;
 }
 
@@ -1536,7 +1535,7 @@ xfs_wait_buftarg(
 	 * ensure here that all reference counts have been dropped before we
 	 * start walking the LRU list.
 	 */
-	flush_workqueue(btp->bt_mount->m_buf_workqueue);
+	drain_workqueue(btp->bt_mount->m_buf_workqueue);
 
 	/* loop until there is nothing left on the lru list. */
 	while (list_lru_count(&btp->bt_lru)) {

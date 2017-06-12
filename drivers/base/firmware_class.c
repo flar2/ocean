@@ -272,9 +272,6 @@ static void __fw_free_buf(struct kref *ref)
 		 (unsigned int)buf->size);
 
 	list_del(&buf->list);
-#ifdef CONFIG_FW_LOADER_USER_HELPER
-	list_del(&buf->pending_list);
-#endif
 	spin_unlock(&fwc->lock);
 
 #ifdef CONFIG_FW_LOADER_USER_HELPER
@@ -1111,14 +1108,13 @@ static int _request_firmware_load(struct firmware_priv *fw_priv,
 		timeout = MAX_JIFFY_OFFSET;
 	}
 
-	timeout = wait_for_completion_interruptible_timeout(&buf->completion,
+	retval = wait_for_completion_interruptible_timeout(&buf->completion,
 			timeout);
-	if (timeout == -ERESTARTSYS || !timeout) {
-		retval = timeout;
+	if (retval == -ERESTARTSYS || !retval) {
 		mutex_lock(&fw_lock);
 		fw_load_abort(fw_priv);
 		mutex_unlock(&fw_lock);
-	} else if (timeout > 0) {
+	} else if (retval > 0) {
 		retval = 0;
 	}
 
@@ -1317,6 +1313,11 @@ static int _request_firmware(struct fw_desc *desc)
 
 	ret = 0;
 	timeout = firmware_loading_timeout();
+
+	//reduce timeout to 1s for msadp
+	if ( loading_timeout > 0 && !strncmp(desc->name, "msadp", 5))
+		timeout =1 * HZ; // 1s
+
 	if (desc->opt_flags & FW_OPT_NOWAIT) {
 		timeout = usermodehelper_read_lock_wait(timeout);
 		if (!timeout) {

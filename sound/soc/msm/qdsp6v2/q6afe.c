@@ -27,6 +27,9 @@
 #include <sound/audio_cal_utils.h>
 #include <sound/adsp_err.h>
 #include <linux/qdsp6v2/apr_tal.h>
+/* HTC_AUD_START */
+#include <sound/htc_acoustic_alsa.h>
+/* HTC_AUD_END */
 
 #define WAKELOCK_TIMEOUT	5000
 enum {
@@ -946,6 +949,11 @@ static int afe_spk_ramp_dn_cfg(int port)
 	if (!ret) {
 		pr_err("%s: wait_event timeout\n", __func__);
 		ret = -EINVAL;
+/* HTC_AUD_START */
+#ifdef CONFIG_HTC_DEBUG_DSP
+		BUG();
+#endif
+/* HTC_AUD_END */
 		goto fail_cmd;
 	}
 	if (atomic_read(&this_afe.status) > 0) {
@@ -1053,6 +1061,11 @@ static int afe_spk_prot_prepare(int src_port, int dst_port, int param_id,
 	if (!ret) {
 		pr_err("%s: wait_event timeout\n", __func__);
 		ret = -EINVAL;
+/* HTC_AUD_START */
+#ifdef CONFIG_HTC_DEBUG_DSP
+		BUG();
+#endif
+/* HTC_AUD_END */
 		goto fail_cmd;
 	}
 	if (atomic_read(&this_afe.status) > 0) {
@@ -2207,6 +2220,11 @@ int afe_send_spdif_clk_cfg(struct afe_param_id_spdif_clk_cfg *cfg,
 		pr_err("%s: wait_event timeout\n",
 				__func__);
 		ret = -EINVAL;
+/* HTC_AUD_START */
+#ifdef CONFIG_HTC_DEBUG_DSP
+		BUG();
+#endif
+/* HTC_AUD_END */
 		goto fail_cmd;
 	}
 	if (atomic_read(&this_afe.status) > 0) {
@@ -2286,6 +2304,11 @@ int afe_send_spdif_ch_status_cfg(struct afe_param_id_spdif_ch_status_cfg
 	if (!ret) {
 		pr_err("%s: wait_event timeout\n",
 				__func__);
+/* HTC_AUD_START */
+#ifdef CONFIG_HTC_DEBUG_DSP
+		BUG();
+#endif
+/* HTC_AUD_END */
 		ret = -EINVAL;
 		goto fail_cmd;
 	}
@@ -4322,6 +4345,11 @@ int afe_cmd_memory_map(phys_addr_t dma_addr_p, u32 dma_buf_sz)
 				 msecs_to_jiffies(TIMEOUT_MS));
 	if (!ret) {
 		pr_err("%s: wait_event timeout\n", __func__);
+/* HTC_AUD_START */
+#ifdef CONFIG_HTC_DEBUG_DSP
+		BUG();
+#endif
+/* HTC_AUD_END */
 		ret = -EINVAL;
 		goto fail_cmd;
 	}
@@ -5193,7 +5221,7 @@ static int afe_sidetone(u16 tx_port_id, u16 rx_port_id, bool enable)
 					AFE_API_VERSION_LOOPBACK_CONFIG;
 	cmd_sidetone.cfg_data.dst_port_id = rx_port_id;
 	cmd_sidetone.cfg_data.routing_mode = LB_MODE_SIDETONE;
-	cmd_sidetone.cfg_data.enable = enable;
+	cmd_sidetone.cfg_data.enable = ((enable == 1) ? sidetone_enable : 0);
 
 	pr_debug("%s rx(0x%x) tx(0x%x) enable(%d) mid(0x%x) gain(%d) sidetone_enable(%d)\n",
 		  __func__, rx_port_id, tx_port_id,
@@ -6692,6 +6720,8 @@ static int afe_set_cal_fb_spkr_prot(int32_t cal_type, size_t data_size,
 	mutex_lock(&this_afe.cal_data[AFE_FB_SPKR_PROT_CAL]->lock);
 	memcpy(&this_afe.prot_cfg, &cal_data->cal_info,
 		sizeof(this_afe.prot_cfg));
+	this_afe.th_ftm_cfg.mode = this_afe.prot_cfg.mode;
+	this_afe.ex_ftm_cfg.mode = this_afe.prot_cfg.mode;
 	mutex_unlock(&this_afe.cal_data[AFE_FB_SPKR_PROT_CAL]->lock);
 done:
 	return ret;
@@ -6833,6 +6863,8 @@ static int afe_get_cal_fb_spkr_prot(int32_t cal_type, size_t data_size,
 		cal_data->cal_info.r0[SP_V2_SPKR_1] = -1;
 		cal_data->cal_info.r0[SP_V2_SPKR_2] = -1;
 	}
+	this_afe.th_ftm_cfg.mode = this_afe.prot_cfg.mode;
+	this_afe.ex_ftm_cfg.mode = this_afe.prot_cfg.mode;
 	mutex_unlock(&this_afe.cal_data[AFE_FB_SPKR_PROT_CAL]->lock);
 	__pm_relax(&wl.ws);
 done:

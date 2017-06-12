@@ -41,7 +41,6 @@ struct msm_camera_sensor_slave_info32 {
 	uint8_t  is_init_params_valid;
 	struct msm_sensor_init_params sensor_init_params;
 	enum msm_sensor_output_format_t output_format;
-	uint8_t bypass_video_node_creation;
 };
 
 struct msm_camera_csid_lut_params32 {
@@ -221,11 +220,19 @@ struct msm_ois_set_info_t32 {
 	struct msm_ois_params_t32 ois_params;
 };
 
+//HTC_START
+struct ois_behavior_data32 {
+	struct compat_timeval timestamp;
+	uint32_t data;
+};
+//HTC_END
+
 struct msm_ois_cfg_data32 {
 	int cfgtype;
 	union {
 		struct msm_ois_set_info_t32 set_info;
 		compat_uptr_t settings;
+		struct ois_behavior_data32 behavior; //HTC_ADD
 	} cfg;
 };
 

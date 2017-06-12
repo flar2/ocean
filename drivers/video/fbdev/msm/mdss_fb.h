@@ -232,7 +232,6 @@ struct msm_mdp_interface {
 	int (*configure_panel)(struct msm_fb_data_type *mfd, int mode,
 				int dest_ctrl);
 	int (*input_event_handler)(struct msm_fb_data_type *mfd);
-	void (*footswitch_ctrl)(bool on);
 	int (*pp_release_fnc)(struct msm_fb_data_type *mfd);
 	void *private1;
 };
@@ -241,10 +240,6 @@ struct msm_mdp_interface {
 #define MDSS_BRIGHT_TO_BL(out, v, bl_max, max_bright) do {\
 				out = (2 * (v) * (bl_max) + max_bright);\
 				do_div(out, 2 * max_bright);\
-				} while (0)
-#define MDSS_BL_TO_BRIGHT(out, v, bl_max, max_bright) do {\
-				out = ((v) * (max_bright));\
-				do_div(out, bl_max);\
 				} while (0)
 
 struct mdss_fb_file_info {
@@ -310,12 +305,10 @@ struct msm_fb_data_type {
 	u32 calib_mode_bl;
 	u32 ad_bl_level;
 	u32 bl_level;
-	int bl_extn_level;
 	u32 bl_scale;
 	u32 unset_bl_level;
 	bool allow_bl_update;
 	u32 bl_level_scaled;
-	u32 bl_level_usr;
 	struct mutex bl_lock;
 	struct mutex mdss_sysfs_lock;
 	bool ipc_resume;
@@ -372,6 +365,9 @@ struct msm_fb_data_type {
 	bool pending_switch;
 	struct mutex switch_lock;
 	struct input_handler *input_handler;
+
+	/* HTC: store last brightness value for backlight ctrl 1 calibration */
+	u32 last_bri1;
 };
 
 static inline void mdss_fb_update_notify_update(struct msm_fb_data_type *mfd)
@@ -391,12 +387,6 @@ static inline void mdss_fb_update_notify_update(struct msm_fb_data_type *mfd)
 		add_timer(&mfd->no_update.timer);
 		mutex_unlock(&mfd->no_update.lock);
 	}
-}
-
-/* Function returns true for split link */
-static inline bool is_panel_split_link(struct msm_fb_data_type *mfd)
-{
-	return mfd && mfd->panel_info && mfd->panel_info->split_link_enabled;
 }
 
 /* Function returns true for either any kind of dual display */
@@ -481,5 +471,5 @@ void mdss_fb_report_panel_dead(struct msm_fb_data_type *mfd);
 void mdss_panelinfo_to_fb_var(struct mdss_panel_info *pinfo,
 						struct fb_var_screeninfo *var);
 void mdss_fb_calc_fps(struct msm_fb_data_type *mfd);
-void mdss_fb_idle_pc(struct msm_fb_data_type *mfd);
+int mdss_backlight_trans(int val, struct mdss_panel_info *panel_info, bool brightness_to_bl);
 #endif /* MDSS_FB_H */

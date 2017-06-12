@@ -27,6 +27,10 @@
 #define SSUSB_GADGET_VBUS_DRAW_UNITS 8
 #define HSUSB_GADGET_VBUS_DRAW_UNITS 2
 
+#define MAC_FIRST_DT_LENGTH  18
+#define WIN_LINUX_FIRST_DT1_LENGTH 8
+#define WIN_LINUX_FIRST_DT2_LENGTH 64
+
 /*
  * Based on enumerated USB speed, draw power with set_config and resume
  * HSUSB: 500mA, SSUSB: 900mA
@@ -39,6 +43,57 @@ static bool disable_l1_for_hs;
 module_param(disable_l1_for_hs, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(disable_l1_for_hs,
 	"Disable support for L1 LPM for HS devices");
+
+/*
+ * Copyright (C) 2015 HTC, Inc.
+ * Author: HTC USB Team
+ * The following two functions are used for get OS_type for HTC device.
+ * In tranditional design,the length of request USB_DT_CONFIG will
+ * different. MAC is 4, Windows is 255, Linux is 9. But for MAC 10.11,
+ * both MAC/LINUX is 9. Therefore, the design check_MAC_or_LINUX is use
+ * for distinguish OS_type. This function will store the first length
+ * of USB_DT_STRING and USB_DT_DEVICE and base on the value to get os
+ * type.
+ * 1. The length of first USB_DT_STRING is 2 and USB_DT_DEVICE is 18
+ * for MAC.
+ * 2. The length of first USB_DT_DEVICE is 8/64 for Windows/Linux.
+ */
+static void check_MAC_or_LINUX(struct usb_composite_dev *cdev, int first_dt_length, int first_string_length)
+{
+	switch (first_dt_length)
+	{
+		case MAC_FIRST_DT_LENGTH:
+			if (first_string_length == 2)
+				cdev->os_type = OS_MAC;
+			break;
+		case WIN_LINUX_FIRST_DT1_LENGTH:
+		case WIN_LINUX_FIRST_DT2_LENGTH:
+			cdev->os_type = OS_LINUX;
+			break;
+		default:
+			break;
+	}
+
+	if (cdev->os_type == OS_LINUX)
+		pr_info("%s: Re detect as OS_LINUX \n", __func__);
+	else if (cdev->os_type == OS_MAC)
+		pr_info("%s: Re detect as OS_MAC \n", __func__);
+	else
+		pr_info("unknow os type");
+}
+
+static void get_os_type(struct usb_composite_dev *cdev, int length)
+{
+	if (length == 4) {
+		pr_info("%s: OS_MAC\n", __func__);
+		cdev->os_type = OS_MAC;
+	} else if (length == 255) {
+		pr_info("%s: OS_WINDOWS\n", __func__);
+		cdev->os_type = OS_WINDOWS;
+	} else if (length == 9 && cdev->os_type != OS_WINDOWS && cdev->os_type != OS_MAC) {
+		check_MAC_or_LINUX(cdev, cdev->first_dt_w_length, cdev->first_string_w_length);
+	}
+}
 
 /**
  * struct usb_os_string - represents OS String to be reported by a gadget
@@ -160,16 +215,11 @@ int config_ep_by_speed(struct usb_gadget *g,
 
 ep_found:
 	/* commit results */
-	_ep->maxpacket = usb_endpoint_maxp(chosen_desc) & 0x7ff;
+	_ep->maxpacket = usb_endpoint_maxp(chosen_desc);
 	_ep->desc = chosen_desc;
 	_ep->comp_desc = NULL;
 	_ep->maxburst = 0;
-	_ep->mult = 1;
-
-	if (g->speed == USB_SPEED_HIGH && (usb_endpoint_xfer_isoc(_ep->desc) ||
-				usb_endpoint_xfer_int(_ep->desc)))
-		_ep->mult = ((usb_endpoint_maxp(_ep->desc) & 0x1800) >> 11) + 1;
-
+	_ep->mult = 0;
 	if (!want_comp_desc)
 		return 0;
 
@@ -186,7 +236,7 @@ ep_found:
 		switch (usb_endpoint_type(_ep->desc)) {
 		case USB_ENDPOINT_XFER_ISOC:
 			/* mult: bits 1:0 of bmAttributes */
-			_ep->mult = (comp_desc->bmAttributes & 0x3) + 1;
+			_ep->mult = comp_desc->bmAttributes & 0x3;
 		case USB_ENDPOINT_XFER_BULK:
 		case USB_ENDPOINT_XFER_INT:
 			_ep->maxburst = comp_desc->bMaxBurst + 1;
@@ -1035,6 +1085,8 @@ void usb_remove_config(struct usb_composite_dev *cdev,
 
 	spin_unlock_irqrestore(&cdev->lock, flags);
 
+	cdev->os_type = OS_NOT_YET;
+
 	remove_config(cdev, config);
 }
 
@@ -1634,6 +1686,10 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 		switch (w_value >> 8) {
 
 		case USB_DT_DEVICE:
+			if (cdev->first_dt_w_length == 0) {
+				cdev->first_dt_w_length = w_length;
+				pr_info("[USB] first_dt_w_length = %d \n", cdev->first_dt_w_length);
+			}
 			cdev->desc.bNumConfigurations =
 				count_configs(cdev, USB_DT_DEVICE);
 			if (cdev->desc.bNumConfigurations == 0) {
@@ -1654,6 +1710,9 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 					DBG(cdev,
 					"Config HS device with LPM(L1)\n");
 				}
+			} else if (!disable_l1_for_hs) {
+				cdev->desc.bcdUSB = cpu_to_le16(0x0210);
+				DBG(cdev, "Config HS device with LPM(L1)\n");
 			}
 
 			value = min(w_length, (u16) sizeof cdev->desc);
@@ -1675,6 +1734,7 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 				break;
 			/* FALLTHROUGH */
 		case USB_DT_CONFIG:
+			get_os_type(cdev, w_length);
 			spin_lock(&cdev->lock);
 			value = config_desc(cdev, w_value);
 			spin_unlock(&cdev->lock);
@@ -1682,6 +1742,10 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 				value = min(w_length, (u16) value);
 			break;
 		case USB_DT_STRING:
+			if (cdev->first_string_w_length == 0) {
+				cdev->first_string_w_length = w_length;
+				pr_info("[USB] first_string_w_length = %d \n", cdev->first_string_w_length);
+			}
 			spin_lock(&cdev->lock);
 			value = get_string(cdev, req->buf,
 					w_index, w_value & 0xff);
@@ -1752,7 +1816,9 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 		value = min(w_length, (u16) 1);
 		break;
 
-	/* function drivers must handle get/set altsetting */
+	/* function drivers must handle get/set altsetting; if there's
+	 * no get() method, we know only altsetting zero works.
+	 */
 	case USB_REQ_SET_INTERFACE:
 		if (ctrl->bRequestType != USB_RECIP_INTERFACE)
 			goto unknown;
@@ -1761,13 +1827,7 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 		f = cdev->config->interface[intf];
 		if (!f)
 			break;
-
-		/*
-		 * If there's no get_alt() method, we know only altsetting zero
-		 * works. There is no need to check if set_alt() is not NULL
-		 * as we check this in usb_add_function().
-		 */
-		if (w_value && !f->get_alt)
+		if (w_value && !f->set_alt)
 			break;
 		value = f->set_alt(f, w_index, w_value);
 		if (value == USB_GADGET_DELAYED_STATUS) {
@@ -2070,8 +2130,10 @@ void composite_disconnect(struct usb_gadget *gadget)
 	spin_lock_irqsave(&cdev->lock, flags);
 	if (cdev->config)
 		reset_config(cdev);
-	if (cdev->driver->disconnect)
+	if (cdev->driver->disconnect) {
 		cdev->driver->disconnect(cdev);
+		cdev->os_type = OS_NOT_YET;
+	}
 	if (cdev->delayed_status != 0) {
 		INFO(cdev, "delayed status mismatch..resetting\n");
 		cdev->delayed_status = 0;

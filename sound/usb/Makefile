@@ -13,8 +13,7 @@ snd-usb-audio-objs := 	card.o \
 			pcm.o \
 			proc.o \
 			quirks.o \
-			stream.o \
-			badd.o
+			stream.o
 
 snd-usbmidi-lib-objs := midi.o
 

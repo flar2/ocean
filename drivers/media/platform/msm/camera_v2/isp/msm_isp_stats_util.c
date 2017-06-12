@@ -23,8 +23,7 @@ static inline void msm_isp_stats_cfg_wm_scratch(struct vfe_device *vfe_dev,
 {
 	vfe_dev->hw_info->vfe_ops.stats_ops.update_ping_pong_addr(
 		vfe_dev, stream_info,
-		pingpong_status, vfe_dev->buf_mgr->scratch_buf_stats_addr,
-		SZ_32M);
+		pingpong_status, vfe_dev->buf_mgr->scratch_buf_stats_addr);
 }
 
 static inline void msm_isp_stats_cfg_stream_scratch(
@@ -124,8 +123,7 @@ static int msm_isp_stats_cfg_ping_pong_address(
 		vfe_dev->hw_info->vfe_ops.stats_ops.update_ping_pong_addr(
 			vfe_dev, stream_info, pingpong_status,
 			buf->mapped_info[0].paddr +
-			stream_info->buffer_offset[k],
-			buf->mapped_info[0].len);
+			stream_info->buffer_offset[k]);
 	}
 	stream_info->buf[pingpong_bit] = buf;
 	buf->pingpong_bit = pingpong_bit;
@@ -228,14 +226,9 @@ static int32_t msm_isp_stats_buf_divert(struct vfe_device *vfe_dev,
 		done_buf->buf_idx;
 
 	stats_event->pd_stats_idx = 0xF;
-	if (stream_info->stats_type == MSM_ISP_STATS_BF) {
-		spin_lock_irqsave(&vfe_dev->common_data->
-			common_dev_data_lock, flags);
-		stats_event->pd_stats_idx = vfe_dev->common_data->pd_buf_idx;
-		vfe_dev->common_data->pd_buf_idx = 0xF;
-		spin_unlock_irqrestore(&vfe_dev->common_data->
-			common_dev_data_lock, flags);
-	}
+	if (stream_info->stats_type == MSM_ISP_STATS_BF)
+		stats_event->pd_stats_idx = vfe_dev->pd_buf_idx;
+
 	if (comp_stats_type_mask == NULL) {
 		stats_event->stats_mask =
 			1 << stream_info->stats_type;
@@ -770,7 +763,7 @@ void msm_isp_process_stats_reg_upd_epoch_irq(struct vfe_device *vfe_dev,
 			spin_unlock_irqrestore(&stream_info->lock, flags);
 			if (-EFAULT == rc) {
 				msm_isp_halt_send_error(vfe_dev,
-						ISP_EVENT_PING_PONG_MISMATCH);
+						ISP_EVENT_BUF_FATAL_ERROR);
 				return;
 			}
 			continue;
@@ -838,12 +831,6 @@ static int msm_isp_stats_update_cgc_override(struct vfe_device *vfe_dev,
 	struct vfe_device *update_vfes[MAX_VFE] = {NULL, NULL};
 	struct msm_vfe_stats_stream *stream_info;
 	int k;
-
-	if (stream_cfg_cmd->num_streams > MSM_ISP_STATS_MAX) {
-		pr_err("%s invalid num_streams %d\n", __func__,
-			stream_cfg_cmd->num_streams);
-		return -EINVAL;
-	}
 
 	for (i = 0; i < stream_cfg_cmd->num_streams; i++) {
 		idx = STATS_IDX(stream_cfg_cmd->stream_handle[i]);
@@ -974,11 +961,6 @@ static int msm_isp_check_stream_cfg_cmd(struct vfe_device *vfe_dev,
 	int vfe_idx;
 	uint32_t stats_idx[MSM_ISP_STATS_MAX];
 
-	if (stream_cfg_cmd->num_streams > MSM_ISP_STATS_MAX) {
-		pr_err("%s invalid num_streams %d\n", __func__,
-			stream_cfg_cmd->num_streams);
-		return -EINVAL;
-	}
 	memset(stats_idx, 0, sizeof(stats_idx));
 	for (i = 0; i < stream_cfg_cmd->num_streams; i++) {
 		idx = STATS_IDX(stream_cfg_cmd->stream_handle[i]);
@@ -1092,7 +1074,7 @@ static int msm_isp_start_stats_stream(struct vfe_device *vfe_dev_ioctl,
 	uint32_t comp_stats_mask[MAX_NUM_STATS_COMP_MASK] = {0};
 	uint32_t num_stats_comp_mask = 0;
 	struct msm_vfe_stats_stream *stream_info;
-	struct msm_vfe_stats_shared_data *stats_data = NULL;
+	struct msm_vfe_stats_shared_data *stats_data;
 	int num_stream = 0;
 	struct msm_vfe_stats_stream *streams[MSM_ISP_STATS_MAX];
 	struct msm_isp_timestamp timestamp;
@@ -1154,12 +1136,10 @@ static int msm_isp_start_stats_stream(struct vfe_device *vfe_dev_ioctl,
 			comp_stats_mask[stream_info->composite_flag-1] |=
 				1 << idx;
 
-		ISP_DBG("%s: stats_mask %x %x\n",
+		ISP_DBG("%s: stats_mask %x %x active streams %d\n",
 			__func__, comp_stats_mask[0],
-			comp_stats_mask[1]);
-		if (stats_data)
-			ISP_DBG("%s: active_streams = %d\n", __func__,
-				stats_data->num_active_stream);
+			comp_stats_mask[1],
+			stats_data->num_active_stream);
 		streams[num_stream++] = stream_info;
 	}
 
@@ -1250,12 +1230,6 @@ int msm_isp_update_stats_stream(struct vfe_device *vfe_dev, void *arg)
 	struct msm_isp_sw_framskip *sw_skip_info = NULL;
 	int vfe_idx;
 	int k;
-
-	if (update_cmd->num_streams > MSM_ISP_STATS_MAX) {
-		pr_err("%s: Invalid num_streams %d\n",
-			__func__, update_cmd->num_streams);
-		return -EINVAL;
-	}
 
 	/*validate request*/
 	for (i = 0; i < update_cmd->num_streams; i++) {

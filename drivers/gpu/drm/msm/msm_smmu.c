@@ -53,17 +53,6 @@ struct msm_smmu_domain {
 #define to_msm_smmu(x) container_of(x, struct msm_smmu, base)
 #define msm_smmu_to_client(smmu) (smmu->client)
 
-
-static int msm_smmu_fault_handler(struct iommu_domain *iommu,
-	 struct device *dev, unsigned long iova, int flags, void *arg)
-{
-
-	dev_info(dev, "%s: iova=0x%08lx, flags=0x%x, iommu=%pK\n", __func__,
-			iova, flags, iommu);
-	return 0;
-}
-
-
 static int _msm_smmu_create_mapping(struct msm_smmu_client *client,
 	const struct msm_smmu_domain *domain);
 
@@ -97,7 +86,7 @@ static int msm_smmu_attach(struct msm_mmu *mmu, const char **names, int cnt)
 	return 0;
 }
 
-static void msm_smmu_detach(struct msm_mmu *mmu)
+static void msm_smmu_detach(struct msm_mmu *mmu, const char **names, int cnt)
 {
 	struct msm_smmu *smmu = to_msm_smmu(mmu);
 	struct msm_smmu_client *client = msm_smmu_to_client(smmu);
@@ -115,35 +104,107 @@ static void msm_smmu_detach(struct msm_mmu *mmu)
 	dev_dbg(client->dev, "iommu domain detached\n");
 }
 
-static int msm_smmu_map(struct msm_mmu *mmu, uint64_t iova,
-		struct sg_table *sgt, u32 flags, void *priv)
+static int msm_smmu_map(struct msm_mmu *mmu, uint32_t iova,
+		struct sg_table *sgt, int prot)
+{
+	struct msm_smmu *smmu = to_msm_smmu(mmu);
+	struct msm_smmu_client *client = msm_smmu_to_client(smmu);
+	struct iommu_domain *domain;
+	struct scatterlist *sg;
+	unsigned int da = iova;
+	unsigned int i, j;
+	int ret;
+
+	if (!client)
+		return -ENODEV;
+
+	domain = client->mmu_mapping->domain;
+	if (!domain || !sgt)
+		return -EINVAL;
+
+	for_each_sg(sgt->sgl, sg, sgt->nents, i) {
+		u32 pa = sg_phys(sg) - sg->offset;
+		size_t bytes = sg->length + sg->offset;
+
+		VERB("map[%d]: %08x %08x(%zx)", i, iova, pa, bytes);
+
+		ret = iommu_map(domain, da, pa, bytes, prot);
+		if (ret)
+			goto fail;
+
+		da += bytes;
+	}
+
+	return 0;
+
+fail:
+	da = iova;
+
+	for_each_sg(sgt->sgl, sg, i, j) {
+		size_t bytes = sg->length + sg->offset;
+
+		iommu_unmap(domain, da, bytes);
+		da += bytes;
+	}
+	return ret;
+}
+
+static int msm_smmu_map_sg(struct msm_mmu *mmu, struct sg_table *sgt,
+		enum dma_data_direction dir)
 {
 	struct msm_smmu *smmu = to_msm_smmu(mmu);
 	struct msm_smmu_client *client = msm_smmu_to_client(smmu);
 	int ret;
 
-	if (priv)
-		ret = msm_dma_map_sg_lazy(client->dev, sgt->sgl, sgt->nents,
-			DMA_BIDIRECTIONAL, priv);
-	else
-		ret = dma_map_sg(client->dev, sgt->sgl, sgt->nents,
-			DMA_BIDIRECTIONAL);
+	ret = dma_map_sg(client->dev, sgt->sgl, sgt->nents, dir);
+	if (ret != sgt->nents)
+		return -ENOMEM;
 
-	return (ret != sgt->nents) ? -ENOMEM : 0;
+	return 0;
 }
 
-static void msm_smmu_unmap(struct msm_mmu *mmu, uint64_t iova,
-		struct sg_table *sgt, void *priv)
+static void msm_smmu_unmap_sg(struct msm_mmu *mmu, struct sg_table *sgt,
+		enum dma_data_direction dir)
 {
 	struct msm_smmu *smmu = to_msm_smmu(mmu);
 	struct msm_smmu_client *client = msm_smmu_to_client(smmu);
 
-	if (priv)
-		msm_dma_unmap_sg(client->dev, sgt->sgl, sgt->nents,
-			DMA_BIDIRECTIONAL, priv);
-	else
-		dma_unmap_sg(client->dev, sgt->sgl, sgt->nents,
-			DMA_BIDIRECTIONAL);
+	dma_unmap_sg(client->dev, sgt->sgl, sgt->nents, dir);
+}
+
+static int msm_smmu_unmap(struct msm_mmu *mmu, uint32_t iova,
+		struct sg_table *sgt)
+{
+	struct msm_smmu *smmu = to_msm_smmu(mmu);
+	struct msm_smmu_client *client = msm_smmu_to_client(smmu);
+	struct iommu_domain *domain;
+	struct scatterlist *sg;
+	unsigned int da = iova;
+	int i;
+
+	if (!client)
+		return -ENODEV;
+
+	domain = client->mmu_mapping->domain;
+	if (!domain || !sgt)
+		return -EINVAL;
+
+	for_each_sg(sgt->sgl, sg, sgt->nents, i) {
+		size_t bytes = sg->length + sg->offset;
+		size_t unmapped;
+
+		unmapped = iommu_unmap(domain, da, bytes);
+		if (unmapped < bytes)
+			return unmapped;
+
+		VERB("unmap[%d]: %08x(%zx)", i, iova, bytes);
+
+		WARN_ON(!PAGE_ALIGNED(bytes));
+
+		da += bytes;
+	}
+
+	return 0;
 }
 
 static void msm_smmu_destroy(struct msm_mmu *mmu)
@@ -156,11 +217,42 @@ static void msm_smmu_destroy(struct msm_mmu *mmu)
 	kfree(smmu);
 }
 
+static int msm_smmu_map_dma_buf(struct msm_mmu *mmu, struct sg_table *sgt,
+			struct dma_buf *dma_buf, int dir)
+{
+	struct msm_smmu *smmu = to_msm_smmu(mmu);
+	struct msm_smmu_client *client = msm_smmu_to_client(smmu);
+	int ret;
+
+	ret = msm_dma_map_sg_lazy(client->dev, sgt->sgl, sgt->nents, dir,
+			dma_buf);
+	if (ret != sgt->nents) {
+		DRM_ERROR("dma map sg failed\n");
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+
+static void msm_smmu_unmap_dma_buf(struct msm_mmu *mmu, struct sg_table *sgt,
+			struct dma_buf *dma_buf, int dir)
+{
+	struct msm_smmu *smmu = to_msm_smmu(mmu);
+	struct msm_smmu_client *client = msm_smmu_to_client(smmu);
+
+	msm_dma_unmap_sg(client->dev, sgt->sgl, sgt->nents, dir, dma_buf);
+}
+
 static const struct msm_mmu_funcs funcs = {
 	.attach = msm_smmu_attach,
 	.detach = msm_smmu_detach,
 	.map = msm_smmu_map,
+	.map_sg = msm_smmu_map_sg,
+	.unmap_sg = msm_smmu_unmap_sg,
 	.unmap = msm_smmu_unmap,
+	.map_dma_buf = msm_smmu_map_dma_buf,
+	.unmap_dma_buf = msm_smmu_unmap_dma_buf,
 	.destroy = msm_smmu_destroy,
 };
 
@@ -270,7 +362,6 @@ struct msm_mmu *msm_smmu_new(struct device *dev,
 {
 	struct msm_smmu *smmu;
 	struct device *client_dev;
-	struct msm_smmu_client *client;
 
 	smmu = kzalloc(sizeof(*smmu), GFP_KERNEL);
 	if (!smmu)
@@ -284,11 +375,6 @@ struct msm_mmu *msm_smmu_new(struct device *dev,
 
 	smmu->client_dev = client_dev;
 	msm_mmu_init(&smmu->base, dev, &funcs);
-
-	client = msm_smmu_to_client(smmu);
-	if (client)
-		iommu_set_fault_handler(client->mmu_mapping->domain,
-					msm_smmu_fault_handler, dev);
 
 	return &smmu->base;
 }

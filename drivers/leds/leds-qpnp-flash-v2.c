@@ -32,6 +32,7 @@
 #include <linux/qpnp/qpnp-revid.h>
 #include <linux/log2.h>
 #include "leds.h"
+#include <linux/htc_flashlight.h>
 
 #define	FLASH_LED_REG_LED_STATUS1(base)		(base + 0x08)
 #define	FLASH_LED_REG_LED_STATUS2(base)		(base + 0x09)
@@ -63,13 +64,11 @@
 #define	FLASH_LED_REG_MITIGATION_SEL(base)	(base + 0x6E)
 #define	FLASH_LED_REG_MITIGATION_SW(base)	(base + 0x6F)
 #define	FLASH_LED_REG_LMH_LEVEL(base)		(base + 0x70)
-#define	FLASH_LED_REG_MULTI_STROBE_CTRL(base)	(base + 0x71)
-#define	FLASH_LED_REG_LPG_INPUT_CTRL(base)	(base + 0x72)
 #define	FLASH_LED_REG_CURRENT_DERATE_EN(base)	(base + 0x76)
 
 #define	FLASH_LED_HDRM_VOL_MASK			GENMASK(7, 4)
 #define	FLASH_LED_CURRENT_MASK			GENMASK(6, 0)
-#define	FLASH_LED_STROBE_MASK			GENMASK(1, 0)
+#define	FLASH_LED_ENABLE_MASK			GENMASK(2, 0)
 #define	FLASH_HW_STROBE_MASK			GENMASK(2, 0)
 #define	FLASH_LED_ISC_WARMUP_DELAY_MASK		GENMASK(1, 0)
 #define	FLASH_LED_CURRENT_DERATE_EN_MASK	GENMASK(2, 0)
@@ -93,9 +92,6 @@
 #define	THERMAL_DERATE_SLOW_SHIFT		4
 #define	THERMAL_DERATE_SLOW_MASK		GENMASK(6, 4)
 #define	THERMAL_DERATE_FAST_MASK		GENMASK(2, 0)
-#define	LED1N2_FLASH_ONCE_ONLY_BIT		BIT(0)
-#define	LED3_FLASH_ONCE_ONLY_BIT		BIT(1)
-#define	LPG_INPUT_SEL_BIT			BIT(0)
 
 #define	VPH_DROOP_DEBOUNCE_US_TO_VAL(val_us)	(val_us / 8)
 #define	VPH_DROOP_HYST_MV_TO_VAL(val_mv)	(val_mv / 25)
@@ -132,11 +128,11 @@
 #define	FLASH_LED_LMH_MITIGATION_DISABLE	0
 #define	FLASH_LED_CHGR_MITIGATION_ENABLE	BIT(4)
 #define	FLASH_LED_CHGR_MITIGATION_DISABLE	0
-#define	FLASH_LED_LMH_MITIGATION_SEL_DEFAULT	2
+#define	FLASH_LED_MITIGATION_SEL_DEFAULT	2
 #define	FLASH_LED_MITIGATION_SEL_MAX		2
 #define	FLASH_LED_CHGR_MITIGATION_SEL_SHIFT	4
-#define	FLASH_LED_CHGR_MITIGATION_THRSH_DEFAULT	0xA
-#define	FLASH_LED_CHGR_MITIGATION_THRSH_MAX	0x1F
+#define	FLASH_LED_MITIGATION_THRSH_DEFAULT	0xA
+#define	FLASH_LED_MITIGATION_THRSH_MAX		0x1F
 #define	FLASH_LED_LMH_OCV_THRESH_DEFAULT_UV	3700000
 #define	FLASH_LED_LMH_RBATT_THRESH_DEFAULT_UOHM	400000
 #define	FLASH_LED_IRES_BASE			3
@@ -157,16 +153,32 @@
 #define	FLASH_LED_MOD_ENABLE			BIT(7)
 #define	FLASH_LED_DISABLE			0x00
 #define	FLASH_LED_SAFETY_TMR_DISABLED		0x13
+#define	FLASH_LED_MIN_CURRENT_MA		25
 #define	FLASH_LED_MAX_TOTAL_CURRENT_MA		3750
 
 /* notifier call chain for flash-led irqs */
 static ATOMIC_NOTIFIER_HEAD(irq_notifier_list);
+#define FLASH_TIME_OUT				600
+#define FLT_INFO_LOG(fmt, ...) \
+		printk(KERN_INFO "[FLT] " fmt, ##__VA_ARGS__)
+#define FLT_ERR_LOG(fmt, ...) \
+		printk(KERN_ERR "[FLT][ERR] " fmt, ##__VA_ARGS__)
+#define BACKLIGHT_ON				1
+#define BACKLIGHT_OFF				0
+/*
+* flashlight_brightness_attribute_definition: the definition of flashlight "brightness" attribute
+*/
 
-enum flash_charger_mitigation {
-	FLASH_DISABLE_CHARGER_MITIGATION,
-	FLASH_HW_CHARGER_MITIGATION_BY_ILED_THRSHLD,
-	FLASH_SW_CHARGER_MITIGATION,
+enum flashlight_brightness_attribute_definition
+{ /* range: [0, 255] */
+	FBAD_OFF        = 0,
+	FBAD_TORCH1     = 125, /*torch level1 mode, 50mA (led1)+ 100mA(led0)*/
+	FBAD_TORCH2     = 126, /*torch level2 mode, 50mA (led1)+ 150mA(led0)*/
+	FBAD_TORCH      = 127, //torch mode, 50mA (led1)+ 50mA(led0)
+	FBAD_PREFLASH   = 128, /*torch level1 mode, 50mA (led1)+ 100mA(led0)*/
+	FBAD_FULL       = 255, /*1000mA (led1)+ 1000mA(led0)*/
 };
+
 
 enum flash_led_type {
 	FLASH_LED_TYPE_FLASH,
@@ -179,34 +191,28 @@ enum {
 	LED3,
 };
 
-enum strobe_type {
-	SW_STROBE = 0,
-	HW_STROBE,
-	LPG_STROBE,
-};
-
 /*
  * Configurations for each individual LED
  */
 struct flash_node_data {
 	struct platform_device		*pdev;
 	struct led_classdev		cdev;
-	struct pinctrl			*strobe_pinctrl;
+	struct pinctrl			*pinctrl;
+	struct pinctrl_state		*gpio_state_active;
+	struct pinctrl_state		*gpio_state_suspend;
 	struct pinctrl_state		*hw_strobe_state_active;
 	struct pinctrl_state		*hw_strobe_state_suspend;
 	int				hw_strobe_gpio;
 	int				ires_ua;
 	int				max_current;
 	int				current_ma;
-	int				prev_current_ma;
 	u8				duration;
 	u8				id;
 	u8				type;
 	u8				ires;
 	u8				hdrm_val;
 	u8				current_reg_val;
-	u8				strobe_ctrl;
-	u8				strobe_sel;
+	u8				trigger;
 	bool				led_on;
 };
 
@@ -214,9 +220,6 @@ struct flash_node_data {
 struct flash_switch_data {
 	struct platform_device		*pdev;
 	struct regulator		*vreg;
-	struct pinctrl			*led_en_pinctrl;
-	struct pinctrl_state		*gpio_state_active;
-	struct pinctrl_state		*gpio_state_suspend;
 	struct led_classdev		cdev;
 	int				led_mask;
 	bool				regulator_on;
@@ -244,7 +247,6 @@ struct flash_led_platform_data {
 	int			thermal_thrsh1;
 	int			thermal_thrsh2;
 	int			thermal_thrsh3;
-	int			hw_strobe_option;
 	u32			led1n2_iclamp_low_ma;
 	u32			led1n2_iclamp_mid_ma;
 	u32			led3_iclamp_low_ma;
@@ -259,6 +261,7 @@ struct flash_led_platform_data {
 	u8			chgr_mitigation_sel;
 	u8			lmh_level;
 	u8			iled_thrsh_val;
+	u8			hw_strobe_option;
 	bool			hdrm_auto_mode_en;
 	bool			thermal_derate_en;
 	bool			otst_ramp_bkup_en;
@@ -279,12 +282,42 @@ struct qpnp_flash_led {
 	int				num_fnodes;
 	int				num_snodes;
 	int				enable;
-	int				total_current_ma;
 	u16				base;
 	bool				trigger_lmh;
 	bool				trigger_chgr;
+#ifndef CONFIG_GPIO_STROBE_NOT_SUPPORT
+	uint32_t			flash_strobe;
+#endif
+	int				flash_led_node[3];
+	int				torch_led_node[3];
+	struct led_classdev             flashlight_node;
 };
+static struct qpnp_flash_led *this_led;
 
+struct delayed_work pmi8998_delayed_work;
+static struct workqueue_struct *pmi8998_work_queue;
+static int flashlight_turn_off(void);
+
+int pmi8998_flash_mode(int, int);
+int pmi8998_torch_mode(int, int);
+
+int (*htc_flash_main)(int led1, int led2);
+int (*htc_torch_main)(int led1, int led2);
+
+void (*set_backlight)(int on);
+void backlight_callback_register( void (*enable_backlight)(int) )
+{
+	FLT_INFO_LOG("%s\n", __func__);
+	set_backlight = enable_backlight;
+}
+EXPORT_SYMBOL(backlight_callback_register);
+#ifndef CONFIG_GPIO_STROBE_NOT_SUPPORT
+void gpio_enable_backlight(int on)
+{
+	if(gpio_is_valid(this_led->flash_strobe))
+		gpio_set_value(this_led->flash_strobe,!on);
+}
+#endif
 static int thermal_derate_slow_table[] = {
 	128, 256, 512, 1024, 2048, 4096, 8192, 314592,
 };
@@ -506,12 +539,10 @@ static int qpnp_flash_led_init_settings(struct qpnp_flash_led *led)
 	if (rc < 0)
 		return rc;
 
-	val = led->pdata->chgr_mitigation_sel
-				<< FLASH_LED_CHGR_MITIGATION_SEL_SHIFT;
 	rc = qpnp_flash_led_masked_write(led,
 			FLASH_LED_REG_MITIGATION_SEL(led->base),
 			FLASH_LED_CHGR_MITIGATION_SEL_MASK,
-			val);
+			led->pdata->chgr_mitigation_sel);
 	if (rc < 0)
 		return rc;
 
@@ -531,7 +562,7 @@ static int qpnp_flash_led_init_settings(struct qpnp_flash_led *led)
 
 	if (led->pdata->led1n2_iclamp_low_ma) {
 		val = CURRENT_MA_TO_REG_VAL(led->pdata->led1n2_iclamp_low_ma,
-						led->fnode[LED1].ires_ua);
+						led->fnode[0].ires_ua);
 		rc = qpnp_flash_led_masked_write(led,
 				FLASH_LED_REG_LED1N2_ICLAMP_LOW(led->base),
 				FLASH_LED_CURRENT_MASK, val);
@@ -541,7 +572,7 @@ static int qpnp_flash_led_init_settings(struct qpnp_flash_led *led)
 
 	if (led->pdata->led1n2_iclamp_mid_ma) {
 		val = CURRENT_MA_TO_REG_VAL(led->pdata->led1n2_iclamp_mid_ma,
-						led->fnode[LED1].ires_ua);
+						led->fnode[0].ires_ua);
 		rc = qpnp_flash_led_masked_write(led,
 				FLASH_LED_REG_LED1N2_ICLAMP_MID(led->base),
 				FLASH_LED_CURRENT_MASK, val);
@@ -551,7 +582,7 @@ static int qpnp_flash_led_init_settings(struct qpnp_flash_led *led)
 
 	if (led->pdata->led3_iclamp_low_ma) {
 		val = CURRENT_MA_TO_REG_VAL(led->pdata->led3_iclamp_low_ma,
-						led->fnode[LED3].ires_ua);
+						led->fnode[3].ires_ua);
 		rc = qpnp_flash_led_masked_write(led,
 				FLASH_LED_REG_LED3_ICLAMP_LOW(led->base),
 				FLASH_LED_CURRENT_MASK, val);
@@ -561,7 +592,7 @@ static int qpnp_flash_led_init_settings(struct qpnp_flash_led *led)
 
 	if (led->pdata->led3_iclamp_mid_ma) {
 		val = CURRENT_MA_TO_REG_VAL(led->pdata->led3_iclamp_mid_ma,
-						led->fnode[LED3].ires_ua);
+						led->fnode[3].ires_ua);
 		rc = qpnp_flash_led_masked_write(led,
 				FLASH_LED_REG_LED3_ICLAMP_MID(led->base),
 				FLASH_LED_CURRENT_MASK, val);
@@ -569,28 +600,6 @@ static int qpnp_flash_led_init_settings(struct qpnp_flash_led *led)
 			return rc;
 	}
 
-	if (led->pdata->hw_strobe_option > 0) {
-		rc = qpnp_flash_led_masked_write(led,
-				FLASH_LED_REG_STROBE_CFG(led->base),
-				FLASH_LED_STROBE_MASK,
-				led->pdata->hw_strobe_option);
-		if (rc < 0)
-			return rc;
-	}
-
-	if (led->fnode[LED3].strobe_sel == LPG_STROBE) {
-		rc = qpnp_flash_led_masked_write(led,
-			FLASH_LED_REG_MULTI_STROBE_CTRL(led->base),
-			LED3_FLASH_ONCE_ONLY_BIT, 0);
-		if (rc < 0)
-			return rc;
-
-		rc = qpnp_flash_led_masked_write(led,
-			FLASH_LED_REG_LPG_INPUT_CTRL(led->base),
-			LPG_INPUT_SEL_BIT, LPG_INPUT_SEL_BIT);
-		if (rc < 0)
-			return rc;
-	}
 	return 0;
 }
 
@@ -614,9 +623,9 @@ static int qpnp_flash_led_hw_strobe_enable(struct flash_node_data *fnode,
 
 	if (gpio_is_valid(fnode->hw_strobe_gpio)) {
 		gpio_set_value(fnode->hw_strobe_gpio, on ? 1 : 0);
-	} else if (fnode->strobe_pinctrl && fnode->hw_strobe_state_active &&
+	} else if (fnode->hw_strobe_state_active &&
 					fnode->hw_strobe_state_suspend) {
-		rc = pinctrl_select_state(fnode->strobe_pinctrl,
+		rc = pinctrl_select_state(fnode->pinctrl,
 			on ? fnode->hw_strobe_state_active :
 			fnode->hw_strobe_state_suspend);
 		if (rc < 0) {
@@ -635,6 +644,8 @@ static int qpnp_flash_led_regulator_enable(struct qpnp_flash_led *led,
 
 	if (!snode || !snode->vreg)
 		return 0;
+
+	FLT_INFO_LOG("%s: %s = %d\n", __func__, snode->cdev.name, on);
 
 	if (snode->regulator_on == on)
 		return 0;
@@ -919,29 +930,14 @@ static int qpnp_flash_led_get_max_avail_current(struct qpnp_flash_led *led)
 	return max_avail_current;
 }
 
-static void qpnp_flash_led_aggregate_max_current(struct flash_node_data *fnode)
-{
-	struct qpnp_flash_led *led = dev_get_drvdata(&fnode->pdev->dev);
-
-	if (fnode->current_ma)
-		led->total_current_ma += fnode->current_ma
-						- fnode->prev_current_ma;
-	else
-		led->total_current_ma -= fnode->prev_current_ma;
-
-	fnode->prev_current_ma = fnode->current_ma;
-}
-
 static void qpnp_flash_led_node_set(struct flash_node_data *fnode, int value)
 {
 	int prgm_current_ma = value;
-	int min_ma = fnode->ires_ua / 1000;
-	struct qpnp_flash_led *led = dev_get_drvdata(&fnode->pdev->dev);
 
 	if (value <= 0)
 		prgm_current_ma = 0;
-	else if (value < min_ma)
-		prgm_current_ma = min_ma;
+	else if (value < FLASH_LED_MIN_CURRENT_MA)
+		prgm_current_ma = FLASH_LED_MIN_CURRENT_MA;
 
 	prgm_current_ma = min(prgm_current_ma, fnode->max_current);
 	fnode->current_ma = prgm_current_ma;
@@ -949,13 +945,6 @@ static void qpnp_flash_led_node_set(struct flash_node_data *fnode, int value)
 	fnode->current_reg_val = CURRENT_MA_TO_REG_VAL(prgm_current_ma,
 					fnode->ires_ua);
 	fnode->led_on = prgm_current_ma != 0;
-
-	if (led->pdata->chgr_mitigation_sel == FLASH_SW_CHARGER_MITIGATION) {
-		qpnp_flash_led_aggregate_max_current(fnode);
-		led->trigger_chgr = false;
-		if (led->total_current_ma >= 1000)
-			led->trigger_chgr = true;
-	}
 }
 
 static int qpnp_flash_led_switch_disable(struct flash_switch_data *snode)
@@ -1014,7 +1003,16 @@ static int qpnp_flash_led_switch_disable(struct flash_switch_data *snode)
 
 		led->fnode[i].led_on = false;
 
-		if (led->fnode[i].strobe_sel == HW_STROBE) {
+		if (led->fnode[i].pinctrl) {
+			rc = pinctrl_select_state(led->fnode[i].pinctrl,
+					led->fnode[i].gpio_state_suspend);
+			if (rc < 0) {
+				pr_err("failed to disable GPIO, rc=%d\n", rc);
+				return rc;
+			}
+		}
+
+		if (led->fnode[i].trigger & FLASH_LED_HW_SW_STROBE_SEL_BIT) {
 			rc = qpnp_flash_led_hw_strobe_enable(&led->fnode[i],
 					led->pdata->hw_strobe_option, false);
 			if (rc < 0) {
@@ -1022,17 +1020,6 @@ static int qpnp_flash_led_switch_disable(struct flash_switch_data *snode)
 					rc);
 				return rc;
 			}
-		}
-	}
-
-	if (snode->led_en_pinctrl) {
-		pr_debug("Selecting suspend state for %s\n", snode->cdev.name);
-		rc = pinctrl_select_state(snode->led_en_pinctrl,
-				snode->gpio_state_suspend);
-		if (rc < 0) {
-			pr_err("failed to select pinctrl suspend state rc=%d\n",
-				rc);
-			return rc;
 		}
 	}
 
@@ -1068,6 +1055,13 @@ static int qpnp_flash_led_switch_set(struct flash_switch_data *snode, bool on)
 	if (rc < 0)
 		return rc;
 
+	rc = qpnp_flash_led_masked_write(led,
+					FLASH_LED_REG_STROBE_CFG(led->base),
+					FLASH_LED_ENABLE_MASK,
+					led->pdata->hw_strobe_option);
+	if (rc < 0)
+		return rc;
+
 	val = 0;
 	for (i = 0; i < led->num_fnodes; i++) {
 		if (!led->fnode[i].led_on ||
@@ -1075,13 +1069,13 @@ static int qpnp_flash_led_switch_set(struct flash_switch_data *snode, bool on)
 			continue;
 
 		addr_offset = led->fnode[i].id;
-		if (led->fnode[i].strobe_sel == SW_STROBE)
-			mask = FLASH_LED_HW_SW_STROBE_SEL_BIT;
-		else
+		if (led->fnode[i].trigger & FLASH_LED_HW_SW_STROBE_SEL_BIT)
 			mask = FLASH_HW_STROBE_MASK;
+		else
+			mask = FLASH_LED_HW_SW_STROBE_SEL_BIT;
 		rc = qpnp_flash_led_masked_write(led,
 			FLASH_LED_REG_STROBE_CTRL(led->base + addr_offset),
-			mask, led->fnode[i].strobe_ctrl);
+			mask, led->fnode[i].trigger);
 		if (rc < 0)
 			return rc;
 
@@ -1099,7 +1093,16 @@ static int qpnp_flash_led_switch_set(struct flash_switch_data *snode, bool on)
 
 		val |= FLASH_LED_ENABLE << led->fnode[i].id;
 
-		if (led->fnode[i].strobe_sel == HW_STROBE) {
+		if (led->fnode[i].pinctrl) {
+			rc = pinctrl_select_state(led->fnode[i].pinctrl,
+					led->fnode[i].gpio_state_active);
+			if (rc < 0) {
+				pr_err("failed to enable GPIO rc=%d\n", rc);
+				return rc;
+			}
+		}
+
+		if (led->fnode[i].trigger & FLASH_LED_HW_SW_STROBE_SEL_BIT) {
 			rc = qpnp_flash_led_hw_strobe_enable(&led->fnode[i],
 					led->pdata->hw_strobe_option, true);
 			if (rc < 0) {
@@ -1107,17 +1110,6 @@ static int qpnp_flash_led_switch_set(struct flash_switch_data *snode, bool on)
 					rc);
 				return rc;
 			}
-		}
-	}
-
-	if (snode->led_en_pinctrl) {
-		pr_debug("Selecting active state for %s\n", snode->cdev.name);
-		rc = pinctrl_select_state(snode->led_en_pinctrl,
-				snode->gpio_state_active);
-		if (rc < 0) {
-			pr_err("failed to select pinctrl active state rc=%d\n",
-				rc);
-			return rc;
 		}
 	}
 
@@ -1215,6 +1207,10 @@ int qpnp_flash_led_prepare(struct led_trigger *trig, int options,
 		}
 		*max_current = rc;
 	}
+
+	led->trigger_chgr = false;
+	if (options & PRE_FLASH)
+		led->trigger_chgr = true;
 
 	return 0;
 }
@@ -1385,13 +1381,150 @@ int qpnp_flash_led_unregister_irq_notifier(struct notifier_block *nb)
 	return atomic_notifier_chain_unregister(&irq_notifier_list, nb);
 }
 
+static ssize_t qpnp_flash_led_control_store(struct device *dev,
+			struct device_attribute *attr,
+			const char *buf, size_t count)
+{
+	int led0_curr = 0, led1_curr = 0;
+	sscanf(buf, "%d %d", &led0_curr, &led1_curr);
+
+	pmi8998_flash_mode(led0_curr, led1_curr);
+
+	return count;
+}
+static DEVICE_ATTR(flash, 0220, NULL, qpnp_flash_led_control_store);
+static ssize_t qpnp_torch_led_control_store(struct device *dev,
+			struct device_attribute *attr,
+			const char *buf, size_t count)
+{
+	int led0_curr = 0, led1_curr = 0;
+	sscanf(buf, "%d %d", &led0_curr, &led1_curr);
+
+	pmi8998_torch_mode(led0_curr, led1_curr);
+
+	return count;
+}
+static DEVICE_ATTR(torch, 0220, NULL, qpnp_torch_led_control_store);
+static int flashlight_turn_off(void)
+{
+	FLT_INFO_LOG("%s\n", __func__);
+	pmi8998_flash_mode( 0, 0);
+	return 0;
+}
+
+static void flashlight_turn_off_work(struct work_struct *work)
+{
+	flashlight_turn_off();
+}
+
+static void flashlight_brightness_set(struct led_classdev *led_cdev,
+                                                enum led_brightness value)
+{
+	u16 FBAD_value = value;
+	switch(FBAD_value) {
+	case FBAD_OFF:
+		qpnp_flash_led_brightness_set(&this_led->snode[0].cdev, 0);
+		if(set_backlight)
+			set_backlight(BACKLIGHT_ON);
+		return;
+		break;
+        case FBAD_TORCH1:
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[0]].cdev, 150);
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[1]].cdev, 50);
+		break;
+        case FBAD_TORCH:
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[0]].cdev, 50);
+                qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[1]].cdev, 50);
+		break;
+        case FBAD_PREFLASH:
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[0]].cdev, 100);
+                qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[1]].cdev, 50);
+		break;
+        case FBAD_FULL:
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->flash_led_node[0]].cdev, 1000);
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->flash_led_node[1]].cdev, 1000);
+		if(set_backlight)
+			set_backlight(BACKLIGHT_OFF);
+		break;
+	case FBAD_TORCH2:
+	default:
+                qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[0]].cdev, 150);
+                qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[1]].cdev, 50);
+                break;
+	}
+	qpnp_flash_led_brightness_set(&this_led->snode[0].cdev, 1);
+}
+
+int pmi8998_flash_mode(int led0_curr, int led1_curr)
+{
+	FLT_INFO_LOG("%s: camera flash current %d+%d.\n", __func__, led0_curr, led1_curr);
+
+	if ((led0_curr < 0) || (led1_curr < 0)) {
+		FLT_INFO_LOG("%s: input current value are not valid!!\n", __func__);
+		return 0;
+	} else if (led0_curr == 0 && led1_curr == 0) {
+		qpnp_flash_led_brightness_set(&this_led->snode[0].cdev, 0);
+		if(set_backlight)
+			set_backlight(BACKLIGHT_ON);
+		return 0;
+	}
+
+	if (this_led->flash_led_node[0] >= 0) {
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->flash_led_node[0]].cdev, led0_curr);
+		FLT_INFO_LOG("reg=0x1D343, val=0x%x\n", this_led->fnode[this_led->flash_led_node[0]].current_reg_val);
+	} else
+		FLT_INFO_LOG("%s: flash_led_node 0 is not exist\n", __func__);
+
+	if (this_led->flash_led_node[1] >= 0) {
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->flash_led_node[1]].cdev, led1_curr);
+		FLT_INFO_LOG("reg=0x1D344, val=0x%x\n", this_led->fnode[this_led->flash_led_node[1]].current_reg_val);
+	} else
+		FLT_INFO_LOG("%s: flash_led_node 1 is not exist\n", __func__);
+
+	if(set_backlight)
+		set_backlight(BACKLIGHT_OFF);
+
+	qpnp_flash_led_brightness_set(&this_led->snode[0].cdev, 1);
+	/*** software timer ***/
+	queue_delayed_work(pmi8998_work_queue, &pmi8998_delayed_work, msecs_to_jiffies(FLASH_TIME_OUT));
+
+	return 0;
+}
+
+int pmi8998_torch_mode(int led0_curr, int led1_curr)
+{
+	FLT_INFO_LOG("%s: camera torch current %d+%d.\n", __func__, led0_curr, led1_curr);
+
+	if ((led0_curr < 0) || (led1_curr < 0)) {
+		FLT_INFO_LOG("%s: input current value are not valid!!\n", __func__);
+		return 0;
+	} else if (led0_curr == 0 && led1_curr == 0) {
+		qpnp_flash_led_brightness_set(&this_led->snode[0].cdev, 0);
+		return 0;
+	}
+
+	if (this_led->torch_led_node[0] >= 0) {
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[0]].cdev, led0_curr);
+	} else
+		FLT_INFO_LOG("%s: torch_led_node 0 is not exist\n", __func__);
+
+	if (this_led->torch_led_node[1] >= 0) {
+		qpnp_flash_led_brightness_set(&this_led->fnode[this_led->torch_led_node[1]].cdev, led1_curr);
+	} else
+		FLT_INFO_LOG("%s: torch_led_node 1 is not exist\n", __func__);
+
+	qpnp_flash_led_brightness_set(&this_led->snode[0].cdev, 1);
+
+	return 0;
+}
+
 static int qpnp_flash_led_parse_each_led_dt(struct qpnp_flash_led *led,
 			struct flash_node_data *fnode, struct device_node *node)
 {
 	const char *temp_string;
-	int rc, min_ma;
+	int rc;
 	u32 val;
-	bool hw_strobe = 0, edge_trigger = 0, active_high = 0;
+	bool strobe_sel = 0, edge_trigger = 0, active_high = 0;
 
 	fnode->pdev = led->pdev;
 	fnode->cdev.brightness_set = qpnp_flash_led_brightness_set;
@@ -1445,11 +1578,10 @@ static int qpnp_flash_led_parse_each_led_dt(struct qpnp_flash_led *led,
 		return rc;
 	}
 
-	min_ma = fnode->ires_ua / 1000;
 	rc = of_property_read_u32(node, "qcom,max-current", &val);
 	if (!rc) {
-		if (val < min_ma)
-			val = min_ma;
+		if (val < FLASH_LED_MIN_CURRENT_MA)
+			val = FLASH_LED_MIN_CURRENT_MA;
 		fnode->max_current = val;
 		fnode->cdev.max_brightness = val;
 	} else {
@@ -1459,10 +1591,11 @@ static int qpnp_flash_led_parse_each_led_dt(struct qpnp_flash_led *led,
 
 	rc = of_property_read_u32(node, "qcom,current-ma", &val);
 	if (!rc) {
-		if (val < min_ma || val > fnode->max_current)
+		if (val < FLASH_LED_MIN_CURRENT_MA ||
+				val > fnode->max_current)
 			pr_warn("Invalid operational current specified, capping it\n");
-		if (val < min_ma)
-			val = min_ma;
+		if (val < FLASH_LED_MIN_CURRENT_MA)
+			val = FLASH_LED_MIN_CURRENT_MA;
 		if (val > fnode->max_current)
 			val = fnode->max_current;
 		fnode->current_ma = val;
@@ -1510,68 +1643,16 @@ static int qpnp_flash_led_parse_each_led_dt(struct qpnp_flash_led *led,
 		return rc;
 	}
 
-	fnode->strobe_sel = SW_STROBE;
-	rc = of_property_read_u32(node, "qcom,strobe-sel", &val);
-	if (rc < 0) {
-		if (rc != -EINVAL) {
-			pr_err("Unable to read qcom,strobe-sel property\n");
-			return rc;
-		}
-	} else {
-		if (val < SW_STROBE || val > LPG_STROBE) {
-			pr_err("Incorrect strobe selection specified %d\n",
-				val);
-			return -EINVAL;
-		}
-		fnode->strobe_sel = (u8)val;
-	}
-
-	/*
-	 * LPG strobe is allowed only for LED3 and HW strobe option should be
-	 * option 2 or 3.
-	 */
-	if (fnode->strobe_sel == LPG_STROBE) {
-		if (led->pdata->hw_strobe_option ==
-				FLASH_LED_HW_STROBE_OPTION_1) {
-			pr_err("Incorrect strobe option for LPG strobe\n");
-			return -EINVAL;
-		}
-		if (fnode->id != LED3) {
-			pr_err("Incorrect LED chosen for LPG strobe\n");
-			return -EINVAL;
-		}
-	}
-
-	if (fnode->strobe_sel == HW_STROBE) {
+	strobe_sel = of_property_read_bool(node, "qcom,hw-strobe-sel");
+	if (strobe_sel) {
 		edge_trigger = of_property_read_bool(node,
 						"qcom,hw-strobe-edge-trigger");
 		active_high = !of_property_read_bool(node,
 						"qcom,hw-strobe-active-low");
-		hw_strobe = 1;
-	} else if (fnode->strobe_sel == LPG_STROBE) {
-		/* LPG strobe requires level trigger and active high */
-		edge_trigger = 0;
-		active_high =  1;
-		hw_strobe = 1;
 	}
-	fnode->strobe_ctrl = (hw_strobe << 2) | (edge_trigger << 1) |
-				active_high;
+	fnode->trigger = (strobe_sel << 2) | (edge_trigger << 1) | active_high;
 
-	rc = led_classdev_register(&led->pdev->dev, &fnode->cdev);
-	if (rc < 0) {
-		pr_err("Unable to register led node %d\n", fnode->id);
-		return rc;
-	}
-
-	fnode->cdev.dev->of_node = node;
-	fnode->strobe_pinctrl = devm_pinctrl_get(fnode->cdev.dev);
-	if (IS_ERR_OR_NULL(fnode->strobe_pinctrl)) {
-		pr_debug("No pinctrl defined for %s, err=%ld\n",
-			fnode->cdev.name, PTR_ERR(fnode->strobe_pinctrl));
-		fnode->strobe_pinctrl = NULL;
-	}
-
-	if (fnode->strobe_sel == HW_STROBE) {
+	if (fnode->trigger & FLASH_LED_HW_SW_STROBE_SEL_BIT) {
 		if (of_find_property(node, "qcom,hw-strobe-gpio", NULL)) {
 			fnode->hw_strobe_gpio = of_get_named_gpio(node,
 						"qcom,hw-strobe-gpio", 0);
@@ -1580,11 +1661,11 @@ static int qpnp_flash_led_parse_each_led_dt(struct qpnp_flash_led *led,
 				return fnode->hw_strobe_gpio;
 			}
 			gpio_direction_output(fnode->hw_strobe_gpio, 0);
-		} else if (fnode->strobe_pinctrl) {
+		} else {
 			fnode->hw_strobe_gpio = -1;
 			fnode->hw_strobe_state_active =
-				pinctrl_lookup_state(fnode->strobe_pinctrl,
-							"strobe_enable");
+				pinctrl_lookup_state(fnode->pinctrl,
+				"strobe_enable");
 			if (IS_ERR_OR_NULL(fnode->hw_strobe_state_active)) {
 				pr_err("No active pin for hardware strobe, rc=%ld\n",
 					PTR_ERR(fnode->hw_strobe_state_active));
@@ -1592,14 +1673,46 @@ static int qpnp_flash_led_parse_each_led_dt(struct qpnp_flash_led *led,
 			}
 
 			fnode->hw_strobe_state_suspend =
-				pinctrl_lookup_state(fnode->strobe_pinctrl,
-							"strobe_disable");
+				pinctrl_lookup_state(fnode->pinctrl,
+				"strobe_disable");
 			if (IS_ERR_OR_NULL(fnode->hw_strobe_state_suspend)) {
 				pr_err("No suspend pin for hardware strobe, rc=%ld\n",
 					PTR_ERR(fnode->hw_strobe_state_suspend)
 					);
 				fnode->hw_strobe_state_suspend = NULL;
 			}
+		}
+	}
+
+	rc = led_classdev_register(&led->pdev->dev, &fnode->cdev);
+	if (rc < 0) {
+		pr_err("Unable to register led node %d\n", fnode->id);
+		return rc;
+	}
+
+	fnode->cdev.dev->of_node = node;
+
+	fnode->pinctrl = devm_pinctrl_get(fnode->cdev.dev);
+	if (IS_ERR_OR_NULL(fnode->pinctrl)) {
+		pr_debug("No pinctrl defined\n");
+		fnode->pinctrl = NULL;
+	} else {
+		fnode->gpio_state_active =
+			pinctrl_lookup_state(fnode->pinctrl, "led_enable");
+		if (IS_ERR_OR_NULL(fnode->gpio_state_active)) {
+			pr_err("Cannot lookup LED active state\n");
+			devm_pinctrl_put(fnode->pinctrl);
+			fnode->pinctrl = NULL;
+			return PTR_ERR(fnode->gpio_state_active);
+		}
+
+		fnode->gpio_state_suspend =
+			pinctrl_lookup_state(fnode->pinctrl, "led_disable");
+		if (IS_ERR_OR_NULL(fnode->gpio_state_suspend)) {
+			pr_err("Cannot lookup LED disable state\n");
+			devm_pinctrl_put(fnode->pinctrl);
+			fnode->pinctrl = NULL;
+			return PTR_ERR(fnode->gpio_state_suspend);
 		}
 	}
 
@@ -1667,36 +1780,6 @@ static int qpnp_flash_led_parse_and_register_switch(struct qpnp_flash_led *led,
 	}
 
 	snode->cdev.dev->of_node = node;
-
-	snode->led_en_pinctrl = devm_pinctrl_get(snode->cdev.dev);
-	if (IS_ERR_OR_NULL(snode->led_en_pinctrl)) {
-		pr_debug("No pinctrl defined for %s, err=%ld\n",
-			snode->cdev.name, PTR_ERR(snode->led_en_pinctrl));
-		snode->led_en_pinctrl = NULL;
-	}
-
-	if (snode->led_en_pinctrl) {
-		snode->gpio_state_active =
-			pinctrl_lookup_state(snode->led_en_pinctrl,
-						"led_enable");
-		if (IS_ERR_OR_NULL(snode->gpio_state_active)) {
-			pr_err("Cannot lookup LED active state\n");
-			devm_pinctrl_put(snode->led_en_pinctrl);
-			snode->led_en_pinctrl = NULL;
-			return PTR_ERR(snode->gpio_state_active);
-		}
-
-		snode->gpio_state_suspend =
-			pinctrl_lookup_state(snode->led_en_pinctrl,
-						"led_disable");
-		if (IS_ERR_OR_NULL(snode->gpio_state_suspend)) {
-			pr_err("Cannot lookup LED disable state\n");
-			devm_pinctrl_put(snode->led_en_pinctrl);
-			snode->led_en_pinctrl = NULL;
-			return PTR_ERR(snode->gpio_state_suspend);
-		}
-	}
-
 	return 0;
 }
 
@@ -1951,10 +2034,9 @@ static int qpnp_flash_led_parse_common_dt(struct qpnp_flash_led *led,
 
 	led->pdata->vph_droop_hysteresis <<= FLASH_LED_VPH_DROOP_HYST_SHIFT;
 
-	led->pdata->hw_strobe_option = -EINVAL;
 	rc = of_property_read_u32(node, "qcom,hw-strobe-option", &val);
 	if (!rc) {
-		led->pdata->hw_strobe_option = val;
+		led->pdata->hw_strobe_option = (u8)val;
 	} else if (rc != -EINVAL) {
 		pr_err("Unable to parse hw strobe option, rc=%d\n", rc);
 		return rc;
@@ -2049,7 +2131,7 @@ static int qpnp_flash_led_parse_common_dt(struct qpnp_flash_led *led,
 		return rc;
 	}
 
-	led->pdata->lmh_mitigation_sel = FLASH_LED_LMH_MITIGATION_SEL_DEFAULT;
+	led->pdata->lmh_mitigation_sel = FLASH_LED_MITIGATION_SEL_DEFAULT;
 	rc = of_property_read_u32(node, "qcom,lmh-mitigation-sel", &val);
 	if (!rc) {
 		led->pdata->lmh_mitigation_sel = val;
@@ -2063,7 +2145,7 @@ static int qpnp_flash_led_parse_common_dt(struct qpnp_flash_led *led,
 		return -EINVAL;
 	}
 
-	led->pdata->chgr_mitigation_sel = FLASH_SW_CHARGER_MITIGATION;
+	led->pdata->chgr_mitigation_sel = FLASH_LED_MITIGATION_SEL_DEFAULT;
 	rc = of_property_read_u32(node, "qcom,chgr-mitigation-sel", &val);
 	if (!rc) {
 		led->pdata->chgr_mitigation_sel = val;
@@ -2077,7 +2159,9 @@ static int qpnp_flash_led_parse_common_dt(struct qpnp_flash_led *led,
 		return -EINVAL;
 	}
 
-	led->pdata->iled_thrsh_val = FLASH_LED_CHGR_MITIGATION_THRSH_DEFAULT;
+	led->pdata->chgr_mitigation_sel <<= FLASH_LED_CHGR_MITIGATION_SEL_SHIFT;
+
+	led->pdata->iled_thrsh_val = FLASH_LED_MITIGATION_THRSH_DEFAULT;
 	rc = of_property_read_u32(node, "qcom,iled-thrsh-ma", &val);
 	if (!rc) {
 		led->pdata->iled_thrsh_val = MITIGATION_THRSH_MA_TO_VAL(val);
@@ -2086,7 +2170,7 @@ static int qpnp_flash_led_parse_common_dt(struct qpnp_flash_led *led,
 		return rc;
 	}
 
-	if (led->pdata->iled_thrsh_val > FLASH_LED_CHGR_MITIGATION_THRSH_MAX) {
+	if (led->pdata->iled_thrsh_val > FLASH_LED_MITIGATION_THRSH_MAX) {
 		pr_err("Invalid iled_thrsh_val specified\n");
 		return -EINVAL;
 	}
@@ -2106,6 +2190,17 @@ static int qpnp_flash_led_parse_common_dt(struct qpnp_flash_led *led,
 	if (led->pdata->led_fault_irq < 0)
 		pr_debug("led-fault-irq not used\n");
 
+#ifndef CONFIG_GPIO_STROBE_NOT_SUPPORT
+	led->flash_strobe = -1;
+	if ( of_find_property(node, "qcom,gpio-flash-strobe", NULL) ) {
+		led->flash_strobe = of_get_named_gpio(node, "qcom,gpio-flash-strobe", 0);
+		FLT_INFO_LOG("flash_strobe = %d\n", led->flash_strobe );
+		backlight_callback_register(&gpio_enable_backlight);
+	} else
+		FLT_INFO_LOG("Unable to read FLASH-STROBE gpio pin\n");
+#else
+	FLT_INFO_LOG("FLASH-STROBE gpio pin not support\n");
+#endif
 	return 0;
 }
 
@@ -2116,6 +2211,7 @@ static int qpnp_flash_led_probe(struct platform_device *pdev)
 	const char *temp_string;
 	unsigned int base;
 	int rc, i = 0, j = 0;
+	FLT_INFO_LOG("%s: ++\n", __func__);
 
 	node = pdev->dev.of_node;
 	if (!node) {
@@ -2190,6 +2286,7 @@ static int qpnp_flash_led_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	temp = NULL;
+
 	i = 0;
 	j = 0;
 	for_each_available_child_of_node(node, temp) {
@@ -2203,6 +2300,10 @@ static int qpnp_flash_led_probe(struct platform_device *pdev)
 				!strcmp("torch", temp_string)) {
 			rc = qpnp_flash_led_parse_each_led_dt(led,
 					&led->fnode[i], temp);
+			if(led->fnode[i].type == FLASH_LED_TYPE_FLASH)
+				led->flash_led_node[led->fnode[i].id] = i;
+			else if(led->fnode[i].type == FLASH_LED_TYPE_TORCH)
+				led->torch_led_node[led->fnode[i].id] = i;
 			if (rc < 0) {
 				pr_err("Unable to parse flash node %d rc=%d\n",
 					i, rc);
@@ -2213,13 +2314,12 @@ static int qpnp_flash_led_probe(struct platform_device *pdev)
 
 		if (!strcmp("switch", temp_string)) {
 			rc = qpnp_flash_led_parse_and_register_switch(led,
-					&led->snode[j], temp);
+					&led->snode[j++], temp);
 			if (rc < 0) {
 				pr_err("Unable to parse and register switch node, rc=%d\n",
 					rc);
 				goto error_switch_register;
 			}
-			j++;
 		}
 	}
 
@@ -2292,9 +2392,47 @@ static int qpnp_flash_led_probe(struct platform_device *pdev)
 	spin_lock_init(&led->lock);
 
 	dev_set_drvdata(&pdev->dev, led);
+#ifndef CONFIG_GPIO_STROBE_NOT_SUPPORT
+	if( gpio_is_valid(led->flash_strobe)) {
+		rc = gpio_request(led->flash_strobe, "flash_strobe_gpio");
+		if (rc) {
+			FLT_ERR_LOG("%s: gpio_request failed for flash_strobe(%d).\n", __func__, rc);
+			return rc;
+		}
 
+		rc = gpio_direction_output( led->flash_strobe, 0 );
+		if (rc) {
+			FLT_ERR_LOG("%s: gpio_direction_output failed for flash_strobe(%d).\n", __func__, rc);
+			gpio_free(led->flash_strobe);
+			return rc;
+		}
+	}
+#endif
+	this_led =led;
+	INIT_DELAYED_WORK(&pmi8998_delayed_work, flashlight_turn_off_work);
+	pmi8998_work_queue = create_singlethread_workqueue("pmi8998_wq");
+	if (!pmi8998_work_queue)
+		goto err_create_pmi8998_work_queue;
+
+	htc_flash_main = &pmi8998_flash_mode;
+	htc_torch_main = &pmi8998_torch_mode;
+
+	led->flashlight_node.name		= "flashlight";
+	led->flashlight_node.brightness_set	= flashlight_brightness_set;
+	led->flashlight_node.brightness_get 	= qpnp_flash_led_brightness_get;
+
+	rc = led_classdev_register(&led->pdev->dev, &led->flashlight_node);
+	device_create_file(led->flashlight_node.dev, &dev_attr_flash);
+	device_create_file(led->flashlight_node.dev, &dev_attr_torch);
+
+	FLT_INFO_LOG("%s: --\n", __func__);
 	return 0;
 
+err_create_pmi8998_work_queue:
+#ifndef CONFIG_GPIO_STROBE_NOT_SUPPORT
+	if(gpio_is_valid(led->flash_strobe))
+		gpio_free(led->flash_strobe);
+#endif
 sysfs_fail:
 	for (--j; j >= 0; j--)
 		sysfs_remove_file(&led->snode[i].cdev.dev->kobj,
@@ -2334,6 +2472,13 @@ static int qpnp_flash_led_remove(struct platform_device *pdev)
 			qpnp_flash_led_regulator_enable(led,
 					&led->snode[i], false);
 	}
+#ifndef CONFIG_GPIO_STROBE_NOT_SUPPORT
+	if(gpio_is_valid(this_led->flash_strobe))
+		gpio_free(this_led->flash_strobe);
+#endif
+	device_remove_file(led->flashlight_node.dev,&dev_attr_flash);
+	device_remove_file(led->flashlight_node.dev,&dev_attr_torch);
+	led_classdev_unregister(&led->flashlight_node);
 
 	while (i > 0)
 		led_classdev_unregister(&led->snode[--i].cdev);

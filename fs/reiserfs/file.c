@@ -260,10 +260,10 @@ const struct file_operations reiserfs_file_operations = {
 
 const struct inode_operations reiserfs_file_inode_operations = {
 	.setattr = reiserfs_setattr,
-	.setxattr = generic_setxattr,
-	.getxattr = generic_getxattr,
+	.setxattr = reiserfs_setxattr,
+	.getxattr = reiserfs_getxattr,
 	.listxattr = reiserfs_listxattr,
-	.removexattr = generic_removexattr,
+	.removexattr = reiserfs_removexattr,
 	.permission = reiserfs_permission,
 	.get_acl = reiserfs_get_acl,
 	.set_acl = reiserfs_set_acl,

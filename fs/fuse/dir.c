@@ -13,6 +13,7 @@
 #include <linux/sched.h>
 #include <linux/namei.h>
 #include <linux/slab.h>
+#include <linux/delay.h>
 
 static bool fuse_use_readdirplus(struct inode *dir, struct dir_context *ctx)
 {
@@ -987,12 +988,19 @@ int fuse_reverse_inval_entry(struct super_block *sb, u64 parent_nodeid,
 	struct inode *parent;
 	struct dentry *dir;
 	struct dentry *entry;
+	int i = 0;
 
 	parent = ilookup5(sb, parent_nodeid, fuse_inode_eq, &parent_nodeid);
 	if (!parent)
 		return -ENOENT;
 
-	mutex_lock(&parent->i_mutex);
+	while (!mutex_trylock(&parent->i_mutex)) {
+		usleep_range(10000, 11000);
+		if (i++ > 500) {
+			iput(parent);
+			return -EBUSY;
+		}
+	}
 	if (!S_ISDIR(parent->i_mode))
 		goto unlock;
 
@@ -1745,46 +1753,14 @@ error:
 static int fuse_setattr(struct dentry *entry, struct iattr *attr)
 {
 	struct inode *inode = d_inode(entry);
-	struct file *file = (attr->ia_valid & ATTR_FILE) ? attr->ia_file : NULL;
-	int ret;
 
 	if (!fuse_allow_current_process(get_fuse_conn(inode)))
 		return -EACCES;
 
-	if (attr->ia_valid & (ATTR_KILL_SUID | ATTR_KILL_SGID)) {
-		int kill;
-
-		attr->ia_valid &= ~(ATTR_KILL_SUID | ATTR_KILL_SGID |
-				    ATTR_MODE);
-		/*
-		 * ia_mode calculation may have used stale i_mode.  Refresh and
-		 * recalculate.
-		 */
-		ret = fuse_do_getattr(inode, NULL, file);
-		if (ret)
-			return ret;
-
-		attr->ia_mode = inode->i_mode;
-		kill = should_remove_suid(entry);
-		if (kill & ATTR_KILL_SUID) {
-			attr->ia_valid |= ATTR_MODE;
-			attr->ia_mode &= ~S_ISUID;
-		}
-		if (kill & ATTR_KILL_SGID) {
-			attr->ia_valid |= ATTR_MODE;
-			attr->ia_mode &= ~S_ISGID;
-		}
-	}
-	if (!attr->ia_valid)
-		return 0;
-
-	ret = fuse_do_setattr(inode, attr, file);
-	if (!ret) {
-		/* Directory mode changed, may need to revalidate access */
-		if (d_is_dir(entry) && (attr->ia_valid & ATTR_MODE))
-			fuse_invalidate_entry_cache(entry);
-	}
-	return ret;
+	if (attr->ia_valid & ATTR_FILE)
+		return fuse_do_setattr(inode, attr, attr->ia_file);
+	else
+		return fuse_do_setattr(inode, attr, NULL);
 }
 
 static int fuse_getattr(struct vfsmount *mnt, struct dentry *entry,
@@ -1877,23 +1853,6 @@ static ssize_t fuse_getxattr(struct dentry *entry, const char *name,
 	return ret;
 }
 
-static int fuse_verify_xattr_list(char *list, size_t size)
-{
-	size_t origsize = size;
-
-	while (size) {
-		size_t thislen = strnlen(list, size);
-
-		if (!thislen || thislen == size)
-			return -EIO;
-
-		size -= thislen + 1;
-		list += thislen + 1;
-	}
-
-	return origsize;
-}
-
 static ssize_t fuse_listxattr(struct dentry *entry, char *list, size_t size)
 {
 	struct inode *inode = d_inode(entry);
@@ -1929,8 +1888,6 @@ static ssize_t fuse_listxattr(struct dentry *entry, char *list, size_t size)
 	ret = fuse_simple_request(fc, &args);
 	if (!ret && !size)
 		ret = outarg.size;
-	if (ret > 0 && size)
-		ret = fuse_verify_xattr_list(list, ret);
 	if (ret == -ENOSYS) {
 		fc->no_listxattr = 1;
 		ret = -EOPNOTSUPP;

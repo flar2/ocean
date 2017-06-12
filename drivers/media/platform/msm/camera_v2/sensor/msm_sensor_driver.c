@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -23,6 +23,22 @@
 #define CDBG(fmt, args...) pr_debug(fmt, ##args)
 
 #define SENSOR_MAX_MOUNTANGLE (360)
+
+//HTC_START
+struct htc_device_info {
+	const char *name;
+	const char *size;
+	const char *other;
+	struct device_attribute attr;
+	struct kobject *kobj;
+};
+
+static struct htc_device_info htc_device_info_list[] = {
+	{"imx362_htc"		, "12M", NULL},
+	{"imx351_htc"		, "16M", "ultrapixel=2328x1744"},
+	{"imx351_cut11_htc"	, "16M", "ultrapixel=2328x1744"},
+};
+//HTC_END
 
 static struct v4l2_file_operations msm_sensor_v4l2_subdev_fops;
 static int32_t msm_sensor_driver_platform_probe(struct platform_device *pdev);
@@ -86,14 +102,11 @@ static int32_t msm_sensor_driver_create_i2c_v4l_subdev
 	struct i2c_client *client = s_ctrl->sensor_i2c_client->client;
 
 	CDBG("%s %s I2c probe succeeded\n", __func__, client->name);
-	if (s_ctrl->bypass_video_node_creation == 0) {
-		rc = camera_init_v4l2(&client->dev, &session_id);
-		if (rc < 0) {
-			pr_err("failed: camera_init_i2c_v4l2 rc %d", rc);
-			return rc;
-		}
+	rc = camera_init_v4l2(&client->dev, &session_id);
+	if (rc < 0) {
+		pr_err("failed: camera_init_i2c_v4l2 rc %d", rc);
+		return rc;
 	}
-
 	CDBG("%s rc %d session_id %d\n", __func__, rc, session_id);
 	snprintf(s_ctrl->msm_sd.sd.name,
 		sizeof(s_ctrl->msm_sd.sd.name), "%s",
@@ -126,14 +139,11 @@ static int32_t msm_sensor_driver_create_v4l_subdev
 	int32_t rc = 0;
 	uint32_t session_id = 0;
 
-	if (s_ctrl->bypass_video_node_creation == 0) {
-		rc = camera_init_v4l2(&s_ctrl->pdev->dev, &session_id);
-		if (rc < 0) {
-			pr_err("failed: camera_init_v4l2 rc %d", rc);
-			return rc;
-		}
+	rc = camera_init_v4l2(&s_ctrl->pdev->dev, &session_id);
+	if (rc < 0) {
+		pr_err("failed: camera_init_v4l2 rc %d", rc);
+		return rc;
 	}
-
 	CDBG("rc %d session_id %d", rc, session_id);
 	s_ctrl->sensordata->sensor_info->session_id = session_id;
 
@@ -682,6 +692,55 @@ static void msm_sensor_fill_sensor_info(struct msm_sensor_ctrl_t *s_ctrl,
 	strlcpy(entity_name, s_ctrl->msm_sd.sd.entity.name, MAX_SENSOR_NAME);
 }
 
+//HTC_START
+static ssize_t sensor_vendor_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct htc_device_info *p = container_of(attr, struct htc_device_info, attr);
+	return sprintf(buf, "%s %s %s\n", p->name, p->size, p->other? : "");
+}
+
+void msm_sensor_htc_sysfs_init(struct msm_camera_sensor_slave_info *sensor_slave_info, struct msm_sensor_ctrl_t *s_ctrl)
+{
+	int ret, i;
+	struct htc_device_info *device = NULL;
+
+	// Find & set device info
+	for (i = 0; i < ARRAY_SIZE(htc_device_info_list); i++) {
+		if (strcmp(htc_device_info_list[i].name, sensor_slave_info->sensor_name) == 0) {
+			device = &htc_device_info_list[i];
+			device->attr.attr.name = "sensor";
+			device->attr.attr.mode = 0444;
+			device->attr.show = sensor_vendor_show;
+			device->attr.store = NULL;
+			break;
+		}
+	}
+	if (device == NULL) {
+		pr_err("[CAM]%s: %s, NOT match sensor name", __func__, sensor_slave_info->sensor_name);
+		return;
+	}
+
+	pr_info("%s:kobject creat and add\n", sensor_slave_info->sensor_name);
+	if (sensor_slave_info->camera_id == 0)
+		device->kobj = kobject_create_and_add("android_camera", NULL);
+	else if (sensor_slave_info->camera_id == 1)
+		device->kobj = kobject_create_and_add("android_camera2", NULL);
+
+	if (device->kobj == NULL) {
+		pr_info("[CAM]%s: kobject creat and add failed\n", sensor_slave_info->sensor_name);
+		return;
+	}
+
+	pr_info("%s:sysfs_create_file\n", sensor_slave_info->sensor_name);
+	ret = sysfs_create_file(device->kobj, &device->attr.attr);
+	if (ret) {
+		pr_info("[CAM]%s: sysfs_create_file failed\n", sensor_slave_info->sensor_name);
+		kobject_del(device->kobj);
+	}
+	pr_info("%s:htc_sysfs_init done\n", sensor_slave_info->sensor_name);
+}
+//HTC_END
+
 /* static function definition */
 static int32_t msm_sensor_driver_is_special_support(
 	struct msm_sensor_ctrl_t *s_ctrl,
@@ -779,8 +838,6 @@ int32_t msm_sensor_driver_probe(void *setting,
 			slave_info32->sensor_init_params;
 		slave_info->output_format =
 			slave_info32->output_format;
-		slave_info->bypass_video_node_creation =
-			!!slave_info32->bypass_video_node_creation;
 		kfree(slave_info32);
 	} else
 #endif
@@ -791,21 +848,6 @@ int32_t msm_sensor_driver_probe(void *setting,
 			rc = -EFAULT;
 			goto free_slave_info;
 		}
-	}
-
-	if (strlen(slave_info->sensor_name) >= MAX_SENSOR_NAME ||
-		strlen(slave_info->eeprom_name) >= MAX_SENSOR_NAME ||
-		strlen(slave_info->actuator_name) >= MAX_SENSOR_NAME ||
-		strlen(slave_info->ois_name) >= MAX_SENSOR_NAME) {
-		pr_err("failed: name len greater than 32.\n");
-		pr_err("sensor name len:%zu, eeprom name len: %zu.\n",
-			strlen(slave_info->sensor_name),
-			strlen(slave_info->eeprom_name));
-		pr_err("actuator name len: %zu, ois name len:%zu.\n",
-			strlen(slave_info->actuator_name),
-			strlen(slave_info->ois_name));
-		rc = -EINVAL;
-		goto free_slave_info;
 	}
 
 	/* Print slave info */
@@ -823,8 +865,7 @@ int32_t msm_sensor_driver_probe(void *setting,
 		slave_info->sensor_init_params.position);
 	CDBG("mount %d",
 		slave_info->sensor_init_params.sensor_mount_angle);
-	CDBG("bypass video node creation %d",
-		slave_info->bypass_video_node_creation);
+
 	/* Validate camera id */
 	if (slave_info->camera_id >= MAX_CAMERAS) {
 		pr_err("failed: invalid camera id %d max %d",
@@ -862,12 +903,9 @@ int32_t msm_sensor_driver_probe(void *setting,
 		 */
 		if (slave_info->sensor_id_info.sensor_id ==
 			s_ctrl->sensordata->cam_slave_info->
-				sensor_id_info.sensor_id &&
-			!(strcmp(slave_info->sensor_name,
-			s_ctrl->sensordata->cam_slave_info->sensor_name))) {
-			pr_err("slot%d: sensor name: %s sensor id%d already probed\n",
+				sensor_id_info.sensor_id) {
+			pr_err("slot%d: sensor id%d already probed\n",
 				slave_info->camera_id,
-				slave_info->sensor_name,
 				s_ctrl->sensordata->cam_slave_info->
 					sensor_id_info.sensor_id);
 			msm_sensor_fill_sensor_info(s_ctrl,
@@ -1001,14 +1039,15 @@ CSID_TG:
 
 	pr_err("%s probe succeeded", slave_info->sensor_name);
 
+//HTC_START
+	msm_sensor_htc_sysfs_init(slave_info, s_ctrl);
+//HTC_END
+
 	/*
 	  Set probe succeeded flag to 1 so that no other camera shall
 	 * probed on this slot
 	 */
 	s_ctrl->is_probe_succeed = 1;
-
-	s_ctrl->bypass_video_node_creation =
-		slave_info->bypass_video_node_creation;
 
 	/*
 	 * Create /dev/videoX node, comment for now until dummy /dev/videoX
@@ -1371,20 +1410,18 @@ static int32_t msm_sensor_driver_i2c_probe(struct i2c_client *client,
 	if (s_ctrl->sensor_i2c_client != NULL) {
 		s_ctrl->sensor_i2c_client->client = client;
 		s_ctrl->sensordata->power_info.dev = &client->dev;
-
-		/* Get clocks information */
-		rc = msm_camera_i2c_dev_get_clk_info(
-			&s_ctrl->sensor_i2c_client->client->dev,
-			&s_ctrl->sensordata->power_info.clk_info,
-			&s_ctrl->sensordata->power_info.clk_ptr,
-			&s_ctrl->sensordata->power_info.clk_info_size);
-		if (rc < 0) {
-			pr_err("failed: msm_camera_i2c_dev_get_clk_info rc %d",
-				rc);
-			goto FREE_S_CTRL;
-		}
-		return rc;
 	}
+	/* Get clocks information */
+	rc = msm_camera_i2c_dev_get_clk_info(
+		&s_ctrl->sensor_i2c_client->client->dev,
+		&s_ctrl->sensordata->power_info.clk_info,
+		&s_ctrl->sensordata->power_info.clk_ptr,
+		&s_ctrl->sensordata->power_info.clk_info_size);
+	if (rc < 0) {
+		pr_err("failed: msm_camera_i2c_dev_get_clk_info rc %d", rc);
+		goto FREE_S_CTRL;
+	}
+	return rc;
 FREE_S_CTRL:
 	kfree(s_ctrl);
 	return rc;

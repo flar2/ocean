@@ -16,6 +16,7 @@
 #include <linux/blktrace_api.h>
 #include <linux/blk-cgroup.h>
 #include "blk.h"
+#include "../kernel/sched/sched.h"
 
 /*
  * tunables
@@ -34,6 +35,11 @@ static int cfq_slice_idle = HZ / 125;
 static int cfq_group_idle = HZ / 125;
 static const int cfq_target_latency = HZ * 3/10; /* 300 ms */
 static const int cfq_hist_divisor = 4;
+
+
+#ifdef CONFIG_HTC_PNPMGR
+extern int launch_event_enabled;
+#endif
 
 /*
  * offset from end of service tree
@@ -71,6 +77,8 @@ static struct kmem_cache *cfq_pool;
 #define CFQ_WEIGHT_LEGACY_MIN	10
 #define CFQ_WEIGHT_LEGACY_DFL	500
 #define CFQ_WEIGHT_LEGACY_MAX	1000
+
+#define DEFAULT_CPU_SHARE 1024
 
 struct cfq_ttime {
 	unsigned long last_end_request;
@@ -1572,7 +1580,7 @@ static struct blkcg_policy_data *cfq_cpd_alloc(gfp_t gfp)
 {
 	struct cfq_group_data *cgd;
 
-	cgd = kzalloc(sizeof(*cgd), gfp);
+	cgd = kzalloc(sizeof(*cgd), GFP_KERNEL);
 	if (!cgd)
 		return NULL;
 	return &cgd->cpd;
@@ -3003,6 +3011,7 @@ static struct request *cfq_check_fifo(struct cfq_queue *cfqq)
 	if (time_before(jiffies, rq->fifo_time))
 		rq = NULL;
 
+	cfq_log_cfqq(cfqq->cfqd, cfqq, "fifo=%p", rq);
 	return rq;
 }
 
@@ -3376,9 +3385,6 @@ static bool cfq_may_dispatch(struct cfq_data *cfqd, struct cfq_queue *cfqq)
 {
 	unsigned int max_dispatch;
 
-	if (cfq_cfqq_must_dispatch(cfqq))
-		return true;
-
 	/*
 	 * Drain async requests before we start sync IO
 	 */
@@ -3470,20 +3476,15 @@ static bool cfq_dispatch_request(struct cfq_data *cfqd, struct cfq_queue *cfqq)
 
 	BUG_ON(RB_EMPTY_ROOT(&cfqq->sort_list));
 
-	rq = cfq_check_fifo(cfqq);
-	if (rq)
-		cfq_mark_cfqq_must_dispatch(cfqq);
-
 	if (!cfq_may_dispatch(cfqd, cfqq))
 		return false;
 
 	/*
 	 * follow expired path, else get first next available
 	 */
+	rq = cfq_check_fifo(cfqq);
 	if (!rq)
 		rq = cfqq->next_rq;
-	else
-		cfq_log_cfqq(cfqq->cfqd, cfqq, "fifo=%p", rq);
 
 	/*
 	 * insert request into driver dispatch list
@@ -3636,6 +3637,22 @@ static void cfq_init_prio_data(struct cfq_queue *cfqq, struct cfq_io_cq *cic)
 {
 	struct task_struct *tsk = current;
 	int ioprio_class;
+
+#ifdef CONFIG_HTC_PNPMGR
+	if (launch_event_enabled)
+	{
+		int bg;
+		bg = (tsk->sched_task_group->shares < DEFAULT_CPU_SHARE)? 1 : 0;
+		if (bg) {
+			cfqq->ioprio_class = IOPRIO_CLASS_IDLE;
+			cfqq->ioprio = 7;
+			cfqq->org_ioprio = cfqq->ioprio;
+			cfq_clear_cfqq_idle_window(cfqq);
+			cfq_mark_cfqq_prio_changed(cfqq);
+			return;
+		}
+	}
+#endif
 
 	if (!cfq_cfqq_prio_changed(cfqq))
 		return;
@@ -3833,6 +3850,7 @@ out:
 	return cfqq;
 }
 
+
 static void
 __cfq_update_io_thinktime(struct cfq_ttime *ttime, unsigned long slice_idle)
 {
@@ -3951,7 +3969,7 @@ cfq_should_preempt(struct cfq_data *cfqd, struct cfq_queue *new_cfqq,
 	 * if the new request is sync, but the currently running queue is
 	 * not, let the sync request have priority.
 	 */
-	if (rq_is_sync(rq) && !cfq_cfqq_sync(cfqq) && !cfq_cfqq_must_dispatch(cfqq))
+	if (rq_is_sync(rq) && !cfq_cfqq_sync(cfqq))
 		return true;
 
 	if (new_cfqq->cfqg != cfqq->cfqg)
@@ -4767,6 +4785,8 @@ static int __init cfq_init(void)
 		cfq_slice_async = 1;
 	if (!cfq_slice_idle)
 		cfq_slice_idle = 1;
+
+	cfq_slice_idle = 0;
 
 #ifdef CONFIG_CFQ_GROUP_IOSCHED
 	if (!cfq_group_idle)

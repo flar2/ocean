@@ -24,6 +24,7 @@
 #include "adreno_ringbuffer.h"
 #include "adreno_trace.h"
 #include "kgsl_sharedmem.h"
+#include "kgsl_htc.h"
 
 #define DRAWQUEUE_NEXT(_i, _s) (((_i) + 1) % (_s))
 
@@ -206,9 +207,6 @@ static inline bool _isidle(struct adreno_device *adreno_dev)
 	unsigned int reg_rbbm_status;
 
 	if (!kgsl_state_is_awake(KGSL_DEVICE(adreno_dev)))
-		goto ret;
-
-	if (adreno_rb_empty(adreno_dev->cur_rb))
 		goto ret;
 
 	/* only check rbbm status to determine if GPU is idle */
@@ -1041,13 +1039,6 @@ static void _set_ft_policy(struct adreno_device *adreno_dev,
 	 */
 	if (drawctxt->base.flags & KGSL_CONTEXT_NO_FAULT_TOLERANCE)
 		set_bit(KGSL_FT_DISABLE, &cmdobj->fault_policy);
-	/*
-	 *  Set the fault tolerance policy to FT_REPLAY - As context wants
-	 *  to invalidate it after a replay attempt fails. This doesn't
-	 *  require to execute the default FT policy.
-	 */
-	else if (drawctxt->base.flags & KGSL_CONTEXT_INVALIDATE_ON_FAULT)
-		set_bit(KGSL_FT_REPLAY, &cmdobj->fault_policy);
 	else
 		cmdobj->fault_policy = adreno_dev->ft_policy;
 }
@@ -2055,22 +2046,12 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 	int ret, i;
 	int fault;
 	int halt;
+	int keepfault, fault_pid = 0;
 
 	fault = atomic_xchg(&dispatcher->fault, 0);
+	keepfault = fault;
 	if (fault == 0)
 		return 0;
-
-	/*
-	 * In the very unlikely case that the power is off, do nothing - the
-	 * state will be reset on power up and everybody will be happy
-	 */
-
-	if (!kgsl_state_is_awake(device) && (fault & ADRENO_SOFT_FAULT)) {
-		/* Clear the existing register values */
-		memset(adreno_ft_regs_val, 0,
-				adreno_ft_regs_num * sizeof(unsigned int));
-		return 0;
-	}
 
 	/*
 	 * On A5xx, read RBBM_STATUS3:SMMU_STALLED_ON_FAULT (BIT 24) to
@@ -2090,12 +2071,7 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 	/* Turn off all the timers */
 	del_timer_sync(&dispatcher->timer);
 	del_timer_sync(&dispatcher->fault_timer);
-	/*
-	 * Deleting uninitialized timer will block for ever on kernel debug
-	 * disable build. Hence skip del timer if it is not initialized.
-	 */
-	if (adreno_is_preemption_enabled(adreno_dev))
-		del_timer_sync(&adreno_dev->preempt.timer);
+	del_timer_sync(&adreno_dev->preempt.timer);
 
 	mutex_lock(&device->mutex);
 
@@ -2142,6 +2118,7 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 
 	if (dispatch_q && !adreno_drawqueue_is_empty(dispatch_q)) {
 		cmdobj = dispatch_q->cmd_q[dispatch_q->head];
+		fault_pid = cmdobj->base.context->proc_priv->pid;
 		trace_adreno_cmdbatch_fault(cmdobj, fault);
 	}
 
@@ -2198,6 +2175,8 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 	}
 
 	atomic_add(halt, &adreno_dev->halt);
+
+	adreno_fault_panic(device, fault_pid, keepfault);
 
 	return 1;
 }
@@ -2532,7 +2511,7 @@ static void adreno_dispatcher_fault_timer(unsigned long data)
 	if (!fault_detect_read_compare(adreno_dev)) {
 		adreno_set_gpu_fault(adreno_dev, ADRENO_SOFT_FAULT);
 		adreno_dispatcher_schedule(KGSL_DEVICE(adreno_dev));
-	} else if (dispatcher->inflight > 0) {
+	} else {
 		mod_timer(&dispatcher->fault_timer,
 			jiffies + msecs_to_jiffies(_fault_timer_interval));
 	}
@@ -2573,20 +2552,6 @@ void adreno_dispatcher_stop(struct adreno_device *adreno_dev)
 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
 
 	del_timer_sync(&dispatcher->timer);
-	del_timer_sync(&dispatcher->fault_timer);
-}
-
-/**
- * adreno_dispatcher_stop() - stop the dispatcher fault timer
- * @adreno_dev: pointer to the adreno device structure
- *
- * Stop the dispatcher fault timer
- */
-void adreno_dispatcher_stop_fault_timer(struct kgsl_device *device)
-{
-	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
-	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
-
 	del_timer_sync(&dispatcher->fault_timer);
 }
 
@@ -2814,9 +2779,11 @@ int adreno_dispatcher_idle(struct adreno_device *adreno_dev)
 	 * Ensure that this function is not called when dispatcher
 	 * mutex is held and device is started
 	 */
+#if defined(CONFIG_DEBUG_MUTEXES) || defined(CONFIG_MUTEX_SPIN_ON_OWNER)
 	if (mutex_is_locked(&dispatcher->mutex) &&
 		dispatcher->mutex.owner == current)
 		BUG_ON(1);
+#endif
 
 	adreno_get_gpu_halt(adreno_dev);
 

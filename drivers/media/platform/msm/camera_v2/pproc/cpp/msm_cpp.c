@@ -980,7 +980,6 @@ static int cpp_init_hardware(struct cpp_device *cpp_dev)
 {
 	int rc = 0;
 	uint32_t vbif_version;
-	cpp_dev->turbo_vote = 0;
 
 	rc = msm_camera_regulator_enable(cpp_dev->cpp_vdd,
 		cpp_dev->num_reg, true);
@@ -1431,14 +1430,6 @@ static int cpp_close_node(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 		pr_err("Invalid close\n");
 		mutex_unlock(&cpp_dev->mutex);
 		return -ENODEV;
-	}
-
-	if (cpp_dev->turbo_vote == 1) {
-		rc = cx_ipeak_update(cpp_dev->cpp_cx_ipeak, false);
-			if (rc)
-				pr_err("cx_ipeak_update failed");
-			else
-				cpp_dev->turbo_vote = 0;
 	}
 
 	cpp_dev->cpp_open_cnt--;
@@ -2125,8 +2116,6 @@ static int msm_cpp_check_buf_type(struct msm_buf_mngr_info *buff_mgr_info,
 			/* More or equal bufs as Input buffer */
 			num_output_bufs = new_frame->batch_info.batch_size;
 		}
-		if (num_output_bufs > MSM_OUTPUT_BUF_CNT)
-			return 0;
 		for (i = 0; i < num_output_bufs; i++) {
 			new_frame->output_buffer_info[i].index =
 				buff_mgr_info->user_buf.buf_idx[i];
@@ -2542,29 +2531,9 @@ static int msm_cpp_cfg_frame(struct cpp_device *cpp_dev,
 		return -EINVAL;
 	}
 
-	/* Stripe index starts at zero */
-	if ((!new_frame->num_strips) ||
-		(new_frame->first_stripe_index >= new_frame->num_strips) ||
-		(new_frame->last_stripe_index  >= new_frame->num_strips) ||
-		(new_frame->first_stripe_index >
-			new_frame->last_stripe_index)) {
-		pr_err("Invalid frame message, #stripes=%d, stripe indices=[%d,%d]\n",
-			new_frame->num_strips,
-			new_frame->first_stripe_index,
-			new_frame->last_stripe_index);
-		return -EINVAL;
-	}
-
-	if (!stripe_size) {
-		pr_err("Invalid frame message, invalid stripe_size (%d)!\n",
-			stripe_size);
-		return -EINVAL;
-	}
-
-	if ((stripe_base == UINT_MAX) ||
-		(new_frame->num_strips >
-			(UINT_MAX - 1 - stripe_base) / stripe_size)) {
-		pr_err("Invalid frame message, num_strips %d is large\n",
+	if (stripe_base == UINT_MAX || new_frame->num_strips >
+		(UINT_MAX - 1 - stripe_base) / stripe_size) {
+		pr_err("Invalid frame message,num_strips %d is large\n",
 			new_frame->num_strips);
 		return -EINVAL;
 	}
@@ -2805,14 +2774,13 @@ static int msm_cpp_cfg(struct cpp_device *cpp_dev,
 	struct msm_cpp_frame_info_t *frame = NULL;
 	struct msm_cpp_frame_info_t k_frame_info;
 	int32_t rc = 0;
-	uint32_t i = 0;
-	uint32_t num_buff = sizeof(k_frame_info.output_buffer_info) /
+	int32_t i = 0;
+	int32_t num_buff = sizeof(k_frame_info.output_buffer_info)/
 				sizeof(struct msm_cpp_buffer_info_t);
-
 	if (copy_from_user(&k_frame_info,
 			(void __user *)ioctl_ptr->ioctl_ptr,
 			sizeof(k_frame_info)))
-		return -EFAULT;
+			return -EFAULT;
 
 	frame = msm_cpp_get_frame(ioctl_ptr);
 	if (!frame) {
@@ -2974,9 +2942,8 @@ static int msm_cpp_validate_input(unsigned int cmd, void *arg,
 		}
 
 		*ioctl_ptr = arg;
-		if (((*ioctl_ptr) == NULL) ||
-			((*ioctl_ptr)->ioctl_ptr == NULL) ||
-			((*ioctl_ptr)->len == 0)) {
+		if ((*ioctl_ptr == NULL) ||
+			((*ioctl_ptr)->ioctl_ptr == NULL)) {
 			pr_err("Error invalid ioctl argument cmd %u", cmd);
 			return -EINVAL;
 		}
@@ -2984,38 +2951,6 @@ static int msm_cpp_validate_input(unsigned int cmd, void *arg,
 	}
 	}
 	return 0;
-}
-
-unsigned long cpp_cx_ipeak_update(struct cpp_device *cpp_dev,
-	unsigned long clock, int idx)
-{
-	unsigned long clock_rate = 0;
-	int ret = 0;
-
-	if ((clock >= cpp_dev->hw_info.freq_tbl
-		[(cpp_dev->hw_info.freq_tbl_count) - 1]) &&
-		(cpp_dev->turbo_vote == 0)) {
-		ret = cx_ipeak_update(cpp_dev->cpp_cx_ipeak, true);
-		if (ret) {
-			pr_err("cx_ipeak voting failed setting clock below turbo");
-			clock = cpp_dev->hw_info.freq_tbl
-				[(cpp_dev->hw_info.freq_tbl_count) - 2];
-		} else {
-			cpp_dev->turbo_vote = 1;
-		}
-		clock_rate = msm_cpp_set_core_clk(cpp_dev, clock, idx);
-	} else if (clock < cpp_dev->hw_info.freq_tbl
-		[(cpp_dev->hw_info.freq_tbl_count) - 1]) {
-		clock_rate = msm_cpp_set_core_clk(cpp_dev, clock, idx);
-		if (cpp_dev->turbo_vote == 1) {
-			ret = cx_ipeak_update(cpp_dev->cpp_cx_ipeak, false);
-			if (ret)
-				pr_err("cx_ipeak unvoting failed");
-			else
-				cpp_dev->turbo_vote = 0;
-		}
-	}
-	return clock_rate;
 }
 
 long msm_cpp_subdev_ioctl(struct v4l2_subdev *sd,
@@ -3400,15 +3335,9 @@ STREAM_BUFF_END:
 				mutex_unlock(&cpp_dev->mutex);
 				return -EINVAL;
 			}
-			if (cpp_dev->cpp_cx_ipeak) {
-				clock_rate = cpp_cx_ipeak_update(cpp_dev,
-					clock_settings.clock_rate,
-					msm_cpp_core_clk_idx);
-			} else {
-				clock_rate = msm_cpp_set_core_clk(cpp_dev,
-					clock_settings.clock_rate,
-					msm_cpp_core_clk_idx);
-			}
+			clock_rate = msm_cpp_set_core_clk(cpp_dev,
+				clock_settings.clock_rate,
+				msm_cpp_core_clk_idx);
 			if (rc < 0) {
 				pr_err("Fail to set core clk\n");
 				mutex_unlock(&cpp_dev->mutex);
@@ -3525,18 +3454,13 @@ STREAM_BUFF_END:
 		if (cpp_dev->iommu_state == CPP_IOMMU_STATE_DETACHED) {
 			struct msm_camera_smmu_attach_type cpp_attach_info;
 
-			if (ioctl_ptr->len !=
-				sizeof(struct msm_camera_smmu_attach_type)) {
-				rc = -EINVAL;
-				break;
-			}
-
 			memset(&cpp_attach_info, 0, sizeof(cpp_attach_info));
 			rc = msm_cpp_copy_from_ioctl_ptr(&cpp_attach_info,
 				ioctl_ptr);
 			if (rc < 0) {
 				pr_err("CPP_IOMMU_ATTACH copy from user fail");
-				break;
+				ERR_COPY_FROM_USER();
+				return -EINVAL;
 			}
 
 			cpp_dev->security_mode = cpp_attach_info.attach;
@@ -3565,20 +3489,16 @@ STREAM_BUFF_END:
 	case VIDIOC_MSM_CPP_IOMMU_DETACH: {
 		if ((cpp_dev->iommu_state == CPP_IOMMU_STATE_ATTACHED) &&
 			(cpp_dev->stream_cnt == 0)) {
-			struct msm_camera_smmu_attach_type cpp_attach_info;
 
-			if (ioctl_ptr->len !=
-				sizeof(struct msm_camera_smmu_attach_type)) {
-				rc = -EINVAL;
-				break;
-			}
+			struct msm_camera_smmu_attach_type cpp_attach_info;
 
 			memset(&cpp_attach_info, 0, sizeof(cpp_attach_info));
 			rc = msm_cpp_copy_from_ioctl_ptr(&cpp_attach_info,
 				ioctl_ptr);
 			if (rc < 0) {
 				pr_err("CPP_IOMMU_DETTACH copy from user fail");
-				break;
+				ERR_COPY_FROM_USER();
+				return -EINVAL;
 			}
 
 			cpp_dev->security_mode = cpp_attach_info.attach;
@@ -3599,7 +3519,6 @@ STREAM_BUFF_END:
 		} else {
 			pr_err("%s:%d IOMMMU attach triggered in invalid state\n",
 				__func__, __LINE__);
-			rc = -EINVAL;
 		}
 		break;
 	}
@@ -3915,7 +3834,6 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 	struct msm_cpp_stream_buff_info_t k_cpp_buff_info;
 	struct msm_cpp_frame_info32_t k32_frame_info;
 	struct msm_cpp_frame_info_t k64_frame_info;
-	struct msm_camera_smmu_attach_type kb_cpp_smmu_attach_info;
 	uint32_t identity_k = 0;
 	bool is_copytouser_req = true;
 	void __user *up = (void __user *)arg;
@@ -4220,23 +4138,11 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 		break;
 	}
 	case VIDIOC_MSM_CPP_IOMMU_ATTACH32:
-	case VIDIOC_MSM_CPP_IOMMU_DETACH32:
-	{
-		if ((kp_ioctl.len != sizeof(struct msm_camera_smmu_attach_type))
-			|| (copy_from_user(&kb_cpp_smmu_attach_info,
-				(void __user *)kp_ioctl.ioctl_ptr,
-				sizeof(kb_cpp_smmu_attach_info)))) {
-			mutex_unlock(&cpp_dev->mutex);
-			return -EINVAL;
-		}
-
-		kp_ioctl.ioctl_ptr = (void *)&kb_cpp_smmu_attach_info;
-		is_copytouser_req = false;
-		cmd = (cmd == VIDIOC_MSM_CPP_IOMMU_ATTACH32) ?
-			VIDIOC_MSM_CPP_IOMMU_ATTACH :
-			VIDIOC_MSM_CPP_IOMMU_DETACH;
+		cmd = VIDIOC_MSM_CPP_IOMMU_ATTACH;
 		break;
-	}
+	case VIDIOC_MSM_CPP_IOMMU_DETACH32:
+		cmd = VIDIOC_MSM_CPP_IOMMU_DETACH;
+		break;
 	case MSM_SD_NOTIFY_FREEZE:
 		break;
 	case MSM_SD_UNNOTIFY_FREEZE:
@@ -4247,8 +4153,7 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 	default:
 		pr_err_ratelimited("%s: unsupported compat type :%x LOAD %lu\n",
 				__func__, cmd, VIDIOC_MSM_CPP_LOAD_FIRMWARE);
-		mutex_unlock(&cpp_dev->mutex);
-		return -EINVAL;
+		break;
 	}
 
 	mutex_unlock(&cpp_dev->mutex);
@@ -4279,7 +4184,7 @@ static long msm_cpp_subdev_fops_compat_ioctl(struct file *file,
 	default:
 		pr_err_ratelimited("%s: unsupported compat type :%d\n",
 				__func__, cmd);
-		return -EINVAL;
+		break;
 	}
 
 	if (is_copytouser_req) {
@@ -4482,15 +4387,6 @@ static int cpp_probe(struct platform_device *pdev)
 			msm_camera_set_clk_flags(cpp_dev->cpp_clk[i],
 				CLKFLAG_NORETAIN_PERIPH);
 		}
-	}
-
-	if (of_find_property(pdev->dev.of_node, "qcom,cpp-cx-ipeak", NULL)) {
-		cpp_dev->cpp_cx_ipeak = cx_ipeak_register(
-			pdev->dev.of_node, "qcom,cpp-cx-ipeak");
-		if (cpp_dev->cpp_cx_ipeak)
-			CPP_DBG("Cx ipeak Registration Successful ");
-		else
-			pr_err("Cx ipeak Registration Unsuccessful");
 	}
 
 	rc = msm_camera_get_reset_info(pdev,

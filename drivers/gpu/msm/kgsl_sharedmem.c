@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2017 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -18,6 +18,7 @@
 #include <linux/kmemleak.h>
 #include <linux/highmem.h>
 #include <linux/scatterlist.h>
+#include <linux/msm_kgsl.h>
 #include <soc/qcom/scm.h>
 #include <soc/qcom/secure_buffer.h>
 
@@ -105,7 +106,8 @@ static void kgsl_cma_unlock_secure(struct kgsl_memdesc *memdesc);
 static ssize_t
 mem_entry_show(struct kgsl_process_private *priv, int type, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%llu\n", priv->stats[type].cur);
+	uint64_t cur = atomic_long_read(&priv->stats[type].cur);
+	return snprintf(buf, PAGE_SIZE, "%llu\n", cur);
 }
 
 /**
@@ -271,6 +273,15 @@ static ssize_t kgsl_drv_full_cache_threshold_show(struct device *dev,
 			kgsl_driver.full_cache_threshold);
 }
 
+static ssize_t kgsl_alloc_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
+{
+	return snprintf(buf, PAGE_SIZE, "%d\n",
+			kgsl_get_alloc_size(true));
+}
+
+
 static DEVICE_ATTR(vmalloc, 0444, kgsl_drv_memstat_show, NULL);
 static DEVICE_ATTR(vmalloc_max, 0444, kgsl_drv_memstat_show, NULL);
 static DEVICE_ATTR(page_alloc, 0444, kgsl_drv_memstat_show, NULL);
@@ -284,6 +295,7 @@ static DEVICE_ATTR(mapped_max, 0444, kgsl_drv_memstat_show, NULL);
 static DEVICE_ATTR(full_cache_threshold, 0644,
 		kgsl_drv_full_cache_threshold_show,
 		kgsl_drv_full_cache_threshold_store);
+static DEVICE_ATTR(kgsl_alloc, 0444, kgsl_alloc_show, NULL);
 
 static const struct device_attribute *drv_attr_list[] = {
 	&dev_attr_vmalloc,
@@ -297,6 +309,7 @@ static const struct device_attribute *drv_attr_list[] = {
 	&dev_attr_mapped,
 	&dev_attr_mapped_max,
 	&dev_attr_full_cache_threshold,
+	&dev_attr_kgsl_alloc,
 	NULL
 };
 
@@ -402,6 +415,8 @@ done:
 
 static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
 {
+	struct kgsl_process_private *priv = memdesc->private;
+
 	kgsl_page_alloc_unmap_kernel(memdesc);
 	/* we certainly do not expect the hostptr to still be mapped */
 	BUG_ON(memdesc->hostptr);
@@ -441,6 +456,9 @@ static void kgsl_page_alloc_free(struct kgsl_memdesc *memdesc)
 	else
 		kgsl_pool_free_sgt(memdesc->sgt);
 
+
+	if (priv)
+		kgsl_process_sub_stats(priv, KGSL_MEM_ENTRY_PAGE_ALLOC, memdesc->size);
 }
 
 /*
@@ -560,70 +578,16 @@ static inline unsigned int _fixup_cache_range_op(unsigned int op)
 }
 #endif
 
-static int kgsl_do_cache_op(struct page *page, void *addr,
-		uint64_t offset, uint64_t size, unsigned int op)
-{
-	void (*cache_op)(const void *, const void *);
-
-	/*
-	 * The dmac_xxx_range functions handle addresses and sizes that
-	 * are not aligned to the cacheline size correctly.
-	 */
-	switch (_fixup_cache_range_op(op)) {
-	case KGSL_CACHE_OP_FLUSH:
-		cache_op = dmac_flush_range;
-		break;
-	case KGSL_CACHE_OP_CLEAN:
-		cache_op = dmac_clean_range;
-		break;
-	case KGSL_CACHE_OP_INV:
-		cache_op = dmac_inv_range;
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	if (page != NULL) {
-		unsigned long pfn = page_to_pfn(page) + offset / PAGE_SIZE;
-		/*
-		 *  page_address() returns the kernel virtual address of page.
-		 *  For high memory kernel virtual address exists only if page
-		 *  has been mapped. So use a version of kmap rather than
-		 *  page_address() for high memory.
-		 */
-		if (PageHighMem(page)) {
-			offset &= ~PAGE_MASK;
-
-			do {
-				unsigned int len = size;
-
-				if (len + offset > PAGE_SIZE)
-					len = PAGE_SIZE - offset;
-
-				page = pfn_to_page(pfn++);
-				addr = kmap_atomic(page);
-				cache_op(addr + offset, addr + offset + len);
-				kunmap_atomic(addr);
-
-				size -= len;
-				offset = 0;
-			} while (size);
-
-			return 0;
-		}
-
-		addr = page_address(page);
-	}
-
-	cache_op(addr + offset, addr + offset + (size_t) size);
-	return 0;
-}
-
 int kgsl_cache_range_op(struct kgsl_memdesc *memdesc, uint64_t offset,
 		uint64_t size, unsigned int op)
 {
-	void *addr = NULL;
-	int ret = 0;
+	/*
+	 * If the buffer is mapped in the kernel operate on that address
+	 * otherwise use the user address
+	 */
+
+	void *addr = (memdesc->hostptr) ?
+		memdesc->hostptr : (void *) memdesc->useraddr;
 
 	if (size == 0 || size > UINT_MAX)
 		return -EINVAL;
@@ -632,59 +596,38 @@ int kgsl_cache_range_op(struct kgsl_memdesc *memdesc, uint64_t offset,
 	if ((offset + size < offset) || (offset + size < size))
 		return -ERANGE;
 
+	/* Make sure the offset + size do not overflow the address */
+	if (addr + ((size_t) offset + (size_t) size) < addr)
+		return -ERANGE;
+
 	/* Check that offset+length does not exceed memdesc->size */
 	if (offset + size > memdesc->size)
 		return -ERANGE;
 
-	if (memdesc->hostptr) {
-		addr = memdesc->hostptr;
-		/* Make sure the offset + size do not overflow the address */
-		if (addr + ((size_t) offset + (size_t) size) < addr)
-			return -ERANGE;
+	/* Return quietly if the buffer isn't mapped on the CPU */
+	if (addr == NULL)
+		return 0;
 
-		ret = kgsl_do_cache_op(NULL, addr, offset, size, op);
-		return ret;
-	}
+	addr = addr + offset;
 
 	/*
-	 * If the buffer is not to mapped to kernel, perform cache
-	 * operations after mapping to kernel.
+	 * The dmac_xxx_range functions handle addresses and sizes that
+	 * are not aligned to the cacheline size correctly.
 	 */
-	if (memdesc->sgt != NULL) {
-		struct scatterlist *sg;
-		unsigned int i, pos = 0;
 
-		for_each_sg(memdesc->sgt->sgl, sg, memdesc->sgt->nents, i) {
-			uint64_t sg_offset, sg_left;
-
-			if (offset >= (pos + sg->length)) {
-				pos += sg->length;
-				continue;
-			}
-			sg_offset = offset > pos ? offset - pos : 0;
-			sg_left = (sg->length - sg_offset > size) ? size :
-						sg->length - sg_offset;
-			ret = kgsl_do_cache_op(sg_page(sg), NULL, sg_offset,
-								sg_left, op);
-			size -= sg_left;
-			if (size == 0)
-				break;
-			pos += sg->length;
-		}
-	} else if (memdesc->pages != NULL) {
-		addr = vmap(memdesc->pages, memdesc->page_count,
-				VM_IOREMAP, pgprot_writecombine(PAGE_KERNEL));
-		if (addr == NULL)
-			return -ENOMEM;
-
-		/* Make sure the offset + size do not overflow the address */
-		if (addr + ((size_t) offset + (size_t) size) < addr)
-			return -ERANGE;
-
-		ret = kgsl_do_cache_op(NULL, addr, offset, size, op);
-		vunmap(addr);
+	switch (_fixup_cache_range_op(op)) {
+	case KGSL_CACHE_OP_FLUSH:
+		dmac_flush_range(addr, addr + (size_t) size);
+		break;
+	case KGSL_CACHE_OP_CLEAN:
+		dmac_clean_range(addr, addr + (size_t) size);
+		break;
+	case KGSL_CACHE_OP_INV:
+		dmac_inv_range(addr, addr + (size_t) size);
+		break;
 	}
-	return ret;
+
+	return 0;
 }
 EXPORT_SYMBOL(kgsl_cache_range_op);
 
@@ -832,6 +775,8 @@ kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 
 	KGSL_STATS_ADD(memdesc->size, &kgsl_driver.stats.page_alloc,
 		&kgsl_driver.stats.page_alloc_max);
+	if (memdesc->private)
+		kgsl_process_add_stats(memdesc->private, KGSL_MEM_ENTRY_PAGE_ALLOC, size);
 
 done:
 	if (ret) {

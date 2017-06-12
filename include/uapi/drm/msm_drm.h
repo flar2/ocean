@@ -22,10 +22,6 @@
 #include <drm/drm.h>
 #include <drm/sde_drm.h>
 
-#if defined(__cplusplus)
-extern "C" {
-#endif
-
 /* Please note that modifications to all structs defined here are
  * subject to backwards-compatibility constraints:
  *  1) Do not use pointers, use __u64 instead for 32 bit / 64 bit
@@ -44,15 +40,6 @@ extern "C" {
 #define MSM_PIPE_2D1         0x02
 #define MSM_PIPE_3D0         0x10
 
-/* The pipe-id just uses the lower bits, so can be OR'd with flags in
- * the upper 16 bits (which could be extended further, if needed, maybe
- * we extend/overload the pipe-id some day to deal with multiple rings,
- * but even then I don't think we need the full lower 16 bits).
- */
-#define MSM_PIPE_ID_MASK     0xffff
-#define MSM_PIPE_ID(x)       ((x) & MSM_PIPE_ID_MASK)
-#define MSM_PIPE_FLAGS(x)    ((x) & ~MSM_PIPE_ID_MASK)
-
 /* timeouts are specified in clock-monotonic absolute times (to simplify
  * restarting interrupted ioctls).  The following struct is logically the
  * same as 'struct timespec' but 32/64b ABI safe.
@@ -67,7 +54,6 @@ struct drm_msm_timespec {
 #define MSM_PARAM_CHIP_ID    0x03
 #define MSM_PARAM_MAX_FREQ   0x04
 #define MSM_PARAM_TIMESTAMP  0x05
-#define MSM_PARAM_GMEM_BASE  0x06
 
 struct drm_msm_param {
 	__u32 pipe;           /* in, MSM_PIPE_x */
@@ -81,8 +67,6 @@ struct drm_msm_param {
 
 #define MSM_BO_SCANOUT       0x00000001     /* scanout capable */
 #define MSM_BO_GPU_READONLY  0x00000002
-#define MSM_BO_PRIVILEGED    0x00000004
-#define MSM_BO_SECURE        0x00000008	    /* Allocate and map as secure */
 #define MSM_BO_CACHE_MASK    0x000f0000
 /* cache modes */
 #define MSM_BO_CACHED        0x00010000
@@ -91,7 +75,6 @@ struct drm_msm_param {
 
 #define MSM_BO_FLAGS         (MSM_BO_SCANOUT | \
                               MSM_BO_GPU_READONLY | \
-                              MSM_BO_SECURE | \
                               MSM_BO_CACHED | \
                               MSM_BO_WC | \
                               MSM_BO_UNCACHED)
@@ -102,14 +85,10 @@ struct drm_msm_gem_new {
 	__u32 handle;         /* out */
 };
 
-#define MSM_INFO_IOVA	0x01
-
-#define MSM_INFO_FLAGS (MSM_INFO_IOVA)
-
 struct drm_msm_gem_info {
 	__u32 handle;         /* in */
-	__u32 flags;	      /* in - combination of MSM_INFO_* flags */
-	__u64 offset;         /* out, mmap() offset or iova */
+	__u32 pad;
+	__u64 offset;         /* out, offset to pass to mmap() */
 };
 
 #define MSM_PREP_READ        0x01
@@ -145,11 +124,7 @@ struct drm_msm_gem_cpu_fini {
  */
 struct drm_msm_gem_submit_reloc {
 	__u32 submit_offset;  /* in, offset from submit_bo */
-#ifdef __cplusplus
-	__u32 or_val;
-#else
-	__u32 or; /* in, value OR'd with result */
-#endif
+	__u32 or;             /* in, value OR'd with result */
 	__s32  shift;          /* in, amount of left shift (can be negative) */
 	__u32 reloc_idx;      /* in, index of reloc_bo buffer */
 	__u64 reloc_offset;   /* in, offset from start of reloc_bo */
@@ -162,13 +137,10 @@ struct drm_msm_gem_submit_reloc {
  *      this buffer in the first-level ringbuffer
  *   CTX_RESTORE_BUF - only executed if there has been a GPU context
  *      switch since the last SUBMIT ioctl
- *   PROFILE_BUF - A profiling buffer written to by both GPU and CPU.
  */
 #define MSM_SUBMIT_CMD_BUF             0x0001
 #define MSM_SUBMIT_CMD_IB_TARGET_BUF   0x0002
 #define MSM_SUBMIT_CMD_CTX_RESTORE_BUF 0x0003
-#define MSM_SUBMIT_CMD_PROFILE_BUF     0x0004
-
 struct drm_msm_gem_submit_cmd {
 	__u32 type;           /* in, one of MSM_SUBMIT_CMD_x */
 	__u32 submit_idx;     /* in, index of submit_bo cmdstream buffer */
@@ -201,31 +173,17 @@ struct drm_msm_gem_submit_bo {
 	__u64 presumed;       /* in/out, presumed buffer address */
 };
 
-/* Valid submit ioctl flags: */
-#define MSM_SUBMIT_RING_MASK 0x000F0000
-#define MSM_SUBMIT_RING_SHIFT 16
-
-#define MSM_SUBMIT_FLAGS (MSM_SUBMIT_RING_MASK)
-
 /* Each cmdstream submit consists of a table of buffers involved, and
  * one or more cmdstream buffers.  This allows for conditional execution
  * (context-restore), and IB buffers needed for per tile/bin draw cmds.
  */
 struct drm_msm_gem_submit {
-	__u32 flags;          /* MSM_PIPE_x | MSM_SUBMIT_x */
+	__u32 pipe;           /* in, MSM_PIPE_x */
 	__u32 fence;          /* out */
 	__u32 nr_bos;         /* in, number of submit_bo's */
 	__u32 nr_cmds;        /* in, number of submit_cmd's */
 	__u64 __user bos;     /* in, ptr to array of submit_bo's */
 	__u64 __user cmds;    /* in, ptr to array of submit_cmd's */
-};
-
-struct drm_msm_gem_submit_profile_buffer {
-	__s64 queue_time;      /* out, Ringbuffer queue time (nsecs) */
-	__s64 submit_time;     /* out, Ringbuffer submission time (nsecs) */
-	__u64 ticks_queued;    /* out, GPU ticks at ringbuffer submission */
-	__u64 ticks_submitted; /* out, GPU ticks before cmdstream execution*/
-	__u64 ticks_retired;   /* out, GPU ticks after cmdstream execution */
 };
 
 /* The normal way to synchronize with the GPU is just to CPU_PREP on
@@ -274,78 +232,6 @@ struct drm_msm_event_resp {
 	__u8 data[];
 };
 
-#define MSM_COUNTER_GROUP_CP 0
-#define MSM_COUNTER_GROUP_RBBM 1
-#define MSM_COUNTER_GROUP_PC 2
-#define MSM_COUNTER_GROUP_VFD 3
-#define MSM_COUNTER_GROUP_HLSQ 4
-#define MSM_COUNTER_GROUP_VPC 5
-#define MSM_COUNTER_GROUP_TSE 6
-#define MSM_COUNTER_GROUP_RAS 7
-#define MSM_COUNTER_GROUP_UCHE 8
-#define MSM_COUNTER_GROUP_TP 9
-#define MSM_COUNTER_GROUP_SP 10
-#define MSM_COUNTER_GROUP_RB 11
-#define MSM_COUNTER_GROUP_VBIF 12
-#define MSM_COUNTER_GROUP_VBIF_PWR 13
-#define MSM_COUNTER_GROUP_VSC 23
-#define MSM_COUNTER_GROUP_CCU 24
-#define MSM_COUNTER_GROUP_LRZ 25
-#define MSM_COUNTER_GROUP_CMP 26
-#define MSM_COUNTER_GROUP_ALWAYSON 27
-#define MSM_COUNTER_GROUP_SP_PWR 28
-#define MSM_COUNTER_GROUP_TP_PWR 29
-#define MSM_COUNTER_GROUP_RB_PWR 30
-#define MSM_COUNTER_GROUP_CCU_PWR 31
-#define MSM_COUNTER_GROUP_UCHE_PWR 32
-#define MSM_COUNTER_GROUP_CP_PWR 33
-#define MSM_COUNTER_GROUP_GPMU_PWR 34
-#define MSM_COUNTER_GROUP_ALWAYSON_PWR 35
-
-/**
- * struct drm_msm_counter - allocate or release a GPU performance counter
- * @groupid: The group ID of the counter to get/put
- * @counterid: For GET returns the counterid that was assigned. For PUT
- *	       release the counter identified by groupid/counterid
- * @countable: For GET the countable for the counter
- */
-struct drm_msm_counter {
-	__u32 groupid;
-	int counterid;
-	__u32 countable;
-	__u32 counter_lo;
-	__u32 counter_hi;
-};
-
-struct drm_msm_counter_read_op {
-	__u64 value;
-	__u32 groupid;
-	int counterid;
-};
-
-/**
- * struct drm_msm_counter_read - Read a number of GPU performance counters
- * ops: Pointer to the list of struct drm_msm_counter_read_op operations
- * nr_ops: Number of operations in the list
- */
-struct drm_msm_counter_read {
-	__u64 __user ops;
-	__u32 nr_ops;
-};
-
-#define MSM_GEM_SYNC_TO_DEV 0
-#define MSM_GEM_SYNC_TO_CPU 1
-
-struct drm_msm_gem_syncop {
-	__u32 handle;
-	__u32 op;
-};
-
-struct drm_msm_gem_sync {
-	__u32 nr_ops;
-	__u64 __user ops;
-};
-
 #define DRM_MSM_GET_PARAM              0x00
 /* placeholder:
 #define DRM_MSM_SET_PARAM              0x01
@@ -356,14 +242,10 @@ struct drm_msm_gem_sync {
 #define DRM_MSM_GEM_CPU_FINI           0x05
 #define DRM_MSM_GEM_SUBMIT             0x06
 #define DRM_MSM_WAIT_FENCE             0x07
-
-#define DRM_SDE_WB_CONFIG              0x40
-#define DRM_MSM_REGISTER_EVENT         0x41
-#define DRM_MSM_DEREGISTER_EVENT       0x42
-#define DRM_MSM_COUNTER_GET            0x43
-#define DRM_MSM_COUNTER_PUT            0x44
-#define DRM_MSM_COUNTER_READ           0x45
-#define DRM_MSM_GEM_SYNC               0x46
+#define DRM_SDE_WB_CONFIG              0x08
+#define DRM_MSM_REGISTER_EVENT         0x09
+#define DRM_MSM_DEREGISTER_EVENT       0x0A
+#define DRM_MSM_NUM_IOCTLS             0x0B
 
 /**
  * Currently DRM framework supports only VSYNC event.
@@ -386,18 +268,4 @@ struct drm_msm_gem_sync {
 			DRM_MSM_REGISTER_EVENT), struct drm_msm_event_req)
 #define DRM_IOCTL_MSM_DEREGISTER_EVENT DRM_IOW((DRM_COMMAND_BASE + \
 			DRM_MSM_DEREGISTER_EVENT), struct drm_msm_event_req)
-#define DRM_IOCTL_MSM_COUNTER_GET \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_COUNTER_GET, struct drm_msm_counter)
-#define DRM_IOCTL_MSM_COUNTER_PUT \
-	DRM_IOW(DRM_COMMAND_BASE + DRM_MSM_COUNTER_PUT, struct drm_msm_counter)
-#define DRM_IOCTL_MSM_COUNTER_READ \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_COUNTER_READ, \
-		struct drm_msm_counter_read)
-#define DRM_IOCTL_MSM_GEM_SYNC DRM_IOW(DRM_COMMAND_BASE + DRM_MSM_GEM_SYNC,\
-		struct drm_msm_gem_sync)
-
-#if defined(__cplusplus)
-}
-#endif
-
 #endif /* __MSM_DRM_H__ */

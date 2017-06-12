@@ -34,7 +34,7 @@
 
 	chosen {
 		stdout-path = "serial0";
-		bootargs = "rcupdate.rcu_expedited=1";
+		bootargs = "rcupdate.rcu_expedited=1 androidboot.rpmdevice=290000.qcom,rpm-stats-ver";
 	};
 
 	cpus {
@@ -275,13 +275,6 @@
 
 	soc: soc { };
 
-	vendor: vendor {
-		#address-cells = <1>;
-		#size-cells = <1>;
-		ranges = <0 0 0 0xffffffff>;
-		compatible = "simple-bus";
-	};
-
 	reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -441,7 +434,6 @@
 		interrupts = <GIC_SPI 326 IRQ_TYPE_NONE>;
 		qcom,ee = <0>;
 		qcom,channel = <0>;
-		qcom,reserved-chan = <511>;
 		#address-cells = <2>;
 		#size-cells = <0>;
 		interrupt-controller;
@@ -1583,8 +1575,6 @@
 		qcom,bus-bw-vectors-bps = <0 400000 20000000 25000000 50000000
 						100000000 200000000 4294967295>;
 
-		qcom,sdr104-wa;
-
 		status = "disabled";
 	};
 
@@ -1827,7 +1817,6 @@
 		vdda18-supply = <&pm8998_l12>;
 		vdda33-supply = <&pm8998_l24>;
 		qcom,vdd-voltage-level = <0 880000 880000>;
-		qcom,vdda33-voltage-level = <2400000 3088000 3088000>;
 		qcom,qusb-phy-init-seq =
 				/* <value reg_offset> */
 					<0x80 0x0
@@ -2122,6 +2111,9 @@
 		qcom,gpio-err-ready = <&smp2pgpio_ssr_smp2p_1_in 1 0>;
 		qcom,gpio-proxy-unvote = <&smp2pgpio_ssr_smp2p_1_in 2 0>;
 		qcom,gpio-stop-ack = <&smp2pgpio_ssr_smp2p_1_in 3 0>;
+		//Modem_BSP++
+		qcom,gpio-reboot-req = <&smp2pgpio_ssr_smp2p_1_in 4 0>;
+		//Modem_BSP--
 		qcom,gpio-shutdown-ack = <&smp2pgpio_ssr_smp2p_1_in 7 0>;
 
 		/* GPIO output to mss */
@@ -2513,7 +2505,9 @@
 	};
 
 	pcie0: qcom,pcie@01c00000 {
-		compatible = "qcom,pci-msm";
+		/* HTC_WIFI_START */
+		compatible = "qcom,pci-msmXXX";
+		/* HTC_WIFI_END */
 		cell-index = <0>;
 
 		reg = <0x1c00000 0x2000>,
@@ -2663,13 +2657,10 @@
 					0x800 0x00 0x00
 					0x808 0x03 0x00>;
 
-		pinctrl-names = "default", "sleep";
+		pinctrl-names = "default";
 		pinctrl-0 = <&pcie0_clkreq_default
 			&pcie0_perst_default
 			&pcie0_wake_default>;
-		pinctrl-1 = <&pcie0_clkreq_default
-			&pcie0_perst_default
-			&pcie0_wake_sleep>;
 
 		perst-gpio = <&tlmm 35 0>;
 		wake-gpio = <&tlmm 37 0>;
@@ -2690,7 +2681,7 @@
 
 		qcom,ep-latency = <10>;
 
-		qcom,boot-option = <0x1>;
+		qcom,ep-wakeirq;
 
 		linux,pci-domain = <0>;
 
@@ -2751,7 +2742,7 @@
 			qcom,mitigation-freq-khz = <576000>;
 			qcom,vph-high-threshold-uv = <3500000>;
 			qcom,vph-low-threshold-uv = <3300000>;
-			qcom,soc-low-threshold = <10>;
+			qcom,soc-low-threshold = <0>;
 			qcom,thermal-handle = <&msm_thermal_freq>;
 		};
 	};
@@ -2824,11 +2815,13 @@
 
 	wdog: qcom,wdt@17817000 {
 		compatible = "qcom,msm-watchdog";
-		reg = <0x17817000 0x1000>;
-		reg-names = "wdt-base";
+		reg = <0x17817000 0x1000>,
+		      <0x010a3000 0x1000>;
+		reg-names = "wdt-base",
+			    "mpm-clock-base";
 		interrupts = <0 3 0>, <0 4 0>;
-		qcom,bark-time = <11000>;
-		qcom,pet-time = <10000>;
+		qcom,bark-time = <18000>;
+		qcom,pet-time = <8000>;
 		qcom,ipi-ping;
 		qcom,wakeup-enable;
 		qcom,scandump-size = <0x40000>;
@@ -2864,7 +2857,8 @@
 
 	qcom,msm-rtb {
 		compatible = "qcom,msm-rtb";
-		qcom,rtb-size = <0x100000>;
+		reg = <0x83400000 0x100000>;
+		reg-names = "msm_rtb_res";
 	};
 
 	qcom,mpm2-sleep-counter@10a3000 {
@@ -2894,6 +2888,12 @@
 			compatible = "qcom,msm-imem-restart_reason";
 			reg = <0x65c 4>;
 		};
+
+                restart_info@a94 {
+                        compatible = "htc,msm-imem-restart_info";
+                        reg = <0xa94 100>;
+                        info_size = <100>;
+                };
 
 		boot_stats@6b0 {
 			compatible = "qcom,msm-imem-boot_stats";
@@ -3082,8 +3082,6 @@
 	msm_ath10k_wlan: qcom,msm_ath10k_wlan {
 		status = "disabled";
 		compatible = "qcom,wcn3990-wifi";
-		reg = <0x18800000 0x800000>;
-		reg-names = "membase";
 		interrupts =
 			<0 413 0 /* CE0 */ >,
 			<0 414 0 /* CE1 */ >,
@@ -3201,10 +3199,6 @@
 			 <&clock_gcc clk_rf_clk3_pin>;
 		clock-names = "rf_clk3_clk", "rf_clk3_pin_clk";
 		qcom,smmu-support;
-		qcom,smmu-s1-en;
-		qcom,smmu-fast-map;
-		qcom,smmu-coherent;
-		qcom,smmu-mapping = <0x20000000 0xe0000000>;
 		status = "disabled";
 	};
 
@@ -3218,6 +3212,21 @@
 			interrupts = <0 349 4>;
 			label = "spss";
 		};
+	};
+
+	mcd {
+		compatible = "qcom,mcd";
+		qcom,ce-hw-instance = <0>;
+		qcom,ce-device = <0>;
+		interrupts = <0 248 0>;
+		interrupt-names = "mcd_irq";
+		clock-names = "core_clk_src", "core_clk",
+			"iface_clk", "bus_clk";
+		clocks = <&clock_gcc clk_ce1_clk>,
+			<&clock_gcc clk_qseecom_ce1_clk>,
+			<&clock_gcc clk_gcc_ce1_ahb_m_clk>,
+			<&clock_gcc clk_gcc_ce1_axi_m_clk>;
+			qcom,ce-opp-freq = <171430000>;
 	};
 };
 
@@ -3336,4 +3345,3 @@
 #include "msm8998-blsp.dtsi"
 #include "msm8998-audio.dtsi"
 #include "msm-smb138x.dtsi"
-#include "msm8998-sde.dtsi"

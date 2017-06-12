@@ -1,6 +1,4 @@
 ccflags-y := -Iinclude/drm -Idrivers/gpu/drm/msm -Idrivers/gpu/drm/msm/dsi-staging
-ccflags-y += -Idrivers/gpu/drm/msm/hdmi
-ccflags-y += -Idrivers/gpu/drm/msm/hdmi-staging
 ccflags-$(CONFIG_DRM_MSM_DSI) += -Idrivers/gpu/drm/msm/dsi
 ccflags-$(CONFIG_SYNC) += -Idrivers/staging/android
 ccflags-$(CONFIG_DRM_MSM_DSI_PLL) += -Idrivers/gpu/drm/msm/dsi
@@ -47,22 +45,14 @@ msm_drm-y := \
 	sde/sde_backlight.o \
 	sde/sde_color_processing.o \
 	sde/sde_vbif.o \
-	sde_dbg_evtlog.o \
-	sde_io_util.o \
-	dba_bridge.o \
-	sde_edid_parser.o
+	sde_dbg_evtlog.o
 
 # use drm gpu driver only if qcom_kgsl driver not available
 ifneq ($(CONFIG_QCOM_KGSL),y)
 msm_drm-y += adreno/adreno_device.o \
 	adreno/adreno_gpu.o \
 	adreno/a3xx_gpu.o \
-	adreno/a4xx_gpu.o \
-	adreno/a5xx_gpu.o \
-	adreno/a5xx_power.o \
-	adreno/a5xx_preempt.o \
-	adreno/a5xx_snapshot.o \
-	adreno/a5xx_counters.o
+	adreno/a4xx_gpu.o
 endif
 
 msm_drm-$(CONFIG_DRM_MSM_MDP4) += mdp/mdp4/mdp4_crtc.o \
@@ -100,11 +90,6 @@ msm_drm-$(CONFIG_DRM_MSM_DSI_STAGING) += dsi-staging/dsi_phy.o \
 				dsi-staging/dsi_panel.o \
 				dsi-staging/dsi_display_test.o
 
-msm_drm-$(CONFIG_DRM_SDE_HDMI) += \
-	hdmi-staging/sde_hdmi.o \
-	hdmi-staging/sde_hdmi_bridge.o \
-	hdmi-staging/sde_hdmi_audio.o \
-
 msm_drm-$(CONFIG_DRM_MSM_DSI_PLL) += dsi/pll/dsi_pll.o \
 				dsi/pll/dsi_pll_28nm.o
 
@@ -136,14 +121,12 @@ msm_drm-$(CONFIG_DRM_MSM) += \
 	msm_gem.o \
 	msm_gem_prime.o \
 	msm_gem_submit.o \
-	msm_gem_vma.o \
 	msm_gpu.o \
 	msm_iommu.o \
 	msm_smmu.o \
 	msm_perf.o \
 	msm_rd.o \
 	msm_ringbuffer.o \
-	msm_prop.o \
-	msm_snapshot.o
+	msm_prop.o
 
 obj-$(CONFIG_DRM_MSM)	+= msm_drm.o

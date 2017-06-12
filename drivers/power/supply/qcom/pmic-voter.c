@@ -18,9 +18,9 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
-#include <linux/pmic-voter.h>
+#include "pmic-voter.h"
 
-#define NUM_MAX_CLIENTS		16
+#define NUM_MAX_CLIENTS	16
 #define DEBUG_FORCE_CLIENT	"DEBUG_FORCE_CLIENT"
 
 static DEFINE_SPINLOCK(votable_list_slock);
@@ -188,38 +188,6 @@ void unlock_votable(struct votable *votable)
 }
 
 /**
- * is_client_vote_enabled() -
- * is_client_vote_enabled_locked() -
- *		The unlocked and locked variants of getting whether a client's
-		vote is enabled.
- * @votable:	the votable object
- * @client_str: client of interest
- *
- * Returns:
- *	True if the client's vote is enabled; false otherwise.
- */
-bool is_client_vote_enabled_locked(struct votable *votable,
-							const char *client_str)
-{
-	int client_id = get_client_id(votable, client_str);
-
-	if (client_id < 0)
-		return false;
-
-	return votable->votes[client_id].enabled;
-}
-
-bool is_client_vote_enabled(struct votable *votable, const char *client_str)
-{
-	bool enabled;
-
-	lock_votable(votable);
-	enabled = is_client_vote_enabled_locked(votable, client_str);
-	unlock_votable(votable);
-	return enabled;
-}
-
-/**
  * get_client_vote() -
  * get_client_vote_locked() -
  *		The unlocked and locked variants of getting a client's voted
@@ -349,6 +317,14 @@ const char *get_effective_client(struct votable *votable)
  *	The return from the callback when present and needs to be called
  *	or zero.
  */
+#ifdef CONFIG_HTC_BATT
+#define SKIP_PRINT_VOTER_CNT		3
+const char *c_skip_print_voter[SKIP_PRINT_VOTER_CNT] = {
+	"FG_WS",
+	"PL_ENABLE_INDIRECT",
+	"QNOVO_DISABLE"
+};
+#endif //CONFIG_HTC_BATT
 int vote(struct votable *votable, const char *client_str, bool enabled, int val)
 {
 	int effective_id = -EINVAL;
@@ -356,12 +332,29 @@ int vote(struct votable *votable, const char *client_str, bool enabled, int val)
 	int client_id;
 	int rc = 0;
 	bool similar_vote = false;
+#ifdef CONFIG_HTC_BATT
+	bool is_print_log = true;
+	int idx = 0;
+#endif //CONFIG_HTC_BATT
 
 	lock_votable(votable);
+
+#ifdef CONFIG_HTC_BATT
+	for (idx = 0; idx < SKIP_PRINT_VOTER_CNT; idx++){
+		if(strcmp(votable->name, c_skip_print_voter[idx]) == 0){
+			is_print_log = false;
+			break;
+		}
+	}
+#endif //CONFIG_HTC_BATT
 
 	client_id = get_client_id(votable, client_str);
 	if (client_id < 0) {
 		rc = client_id;
+#ifdef CONFIG_HTC_BATT
+		pr_info("%s: %s,Client ID = %d over range\n",
+			votable->name, client_str, client_id);
+#endif //CONFIG_HTC_BATT
 		goto out;
 	}
 
@@ -387,12 +380,26 @@ int vote(struct votable *votable, const char *client_str, bool enabled, int val)
 	votable->votes[client_id].value = val;
 
 	if (similar_vote && votable->voted_on) {
+#ifdef CONFIG_HTC_BATT
+		if (is_print_log)
+			pr_info("%s: %s,%d Ignoring similar vote %s of val=%d\n",
+				votable->name,
+				client_str, client_id, enabled ? "on" : "off", val);
+		else
+#endif //CONFIG_HTC_BATT
 		pr_debug("%s: %s,%d Ignoring similar vote %s of val=%d\n",
 			votable->name,
 			client_str, client_id, enabled ? "on" : "off", val);
 		goto out;
 	}
 
+#ifdef CONFIG_HTC_BATT
+	if (is_print_log)
+		pr_info("%s: %s,%d voting %s of val=%d\n",
+			votable->name,
+			client_str, client_id, enabled ? "on" : "off", val);
+	else
+#endif //CONFIG_HTC_BATT
 	pr_debug("%s: %s,%d voting %s of val=%d\n",
 		votable->name,
 		client_str, client_id, enabled ? "on" : "off", val);
@@ -419,6 +426,14 @@ int vote(struct votable *votable, const char *client_str, bool enabled, int val)
 			|| (effective_result != votable->effective_result)) {
 		votable->effective_client_id = effective_id;
 		votable->effective_result = effective_result;
+#ifdef CONFIG_HTC_BATT
+		if(is_print_log)
+			pr_info("%s: effective vote is now %d voted by %s,%d\n",
+				votable->name, effective_result,
+				get_client_str(votable, effective_id),
+				effective_id);
+		else
+#endif //CONFIG_HTC_BATT
 		pr_debug("%s: effective vote is now %d voted by %s,%d\n",
 			votable->name, effective_result,
 			get_client_str(votable, effective_id),

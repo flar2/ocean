@@ -345,6 +345,10 @@ enum msm_sensor_cfg_type_t {
 	CFG_WRITE_I2C_ARRAY_ASYNC,
 	CFG_WRITE_I2C_ARRAY_SYNC,
 	CFG_WRITE_I2C_ARRAY_SYNC_BLOCK,
+	/* HTC_START */
+	CFG_SET_GYRO_CALIBRATION,
+	CFG_SET_SENSOR_OIS_FREQ,
+	/* HTC_END */
 };
 
 enum msm_actuator_cfg_type_t {
@@ -356,6 +360,10 @@ enum msm_actuator_cfg_type_t {
 	CFG_ACTUATOR_POWERDOWN,
 	CFG_ACTUATOR_POWERUP,
 	CFG_ACTUATOR_INIT,
+	//HTC_START
+	CFG_ACTUATOR_OIS_GYRO_GAIN,
+	CFG_ACTUATOR_OIS_SSC_GAIN,
+	//HTC_END
 };
 
 struct msm_ois_opcode {
@@ -371,6 +379,7 @@ enum msm_ois_cfg_type_t {
 	CFG_OIS_POWERUP,
 	CFG_OIS_CONTROL,
 	CFG_OIS_I2C_WRITE_SEQ_TABLE,
+	CFG_OIS_GET_BEHAVIOR_STATUS, // HTC_ADD
 };
 
 enum msm_ois_cfg_download_type_t {
@@ -481,11 +490,20 @@ struct msm_ois_slave_info {
 	uint32_t i2c_addr;
 	struct msm_ois_opcode opcode;
 };
+
+//HTC_START
+struct ois_behavior_data {
+	struct timeval timestamp;
+	uint32_t data;
+};
+//HTC_END
+
 struct msm_ois_cfg_data {
 	int cfgtype;
 	union {
 		struct msm_ois_set_info_t set_info;
 		struct msm_camera_i2c_seq_reg_setting *settings;
+		struct ois_behavior_data behavior; //HTC_ADD
 	} cfg;
 };
 

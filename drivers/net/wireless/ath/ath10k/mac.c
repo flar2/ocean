@@ -3506,7 +3506,6 @@ static int ath10k_mac_tx(struct ath10k *ar,
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 	int ret;
 
-	skb_orphan(skb);
 	/* We should disable CCK RATE due to P2P */
 	if (info->flags & IEEE80211_TX_CTL_NO_CCK_RATE)
 		ath10k_dbg(ar, ATH10K_DBG_MAC, "IEEE80211_TX_CTL_NO_CCK_RATE\n");
@@ -4450,8 +4449,7 @@ static int ath10k_start(struct ieee80211_hw *hw)
 		ar->state = ATH10K_STATE_ON;
 		break;
 	case ATH10K_STATE_RESTARTING:
-		if (!test_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags))
-			ath10k_halt(ar);
+		ath10k_halt(ar);
 		ar->state = ATH10K_STATE_RESTARTED;
 		break;
 	case ATH10K_STATE_ON:
@@ -4539,7 +4537,6 @@ static int ath10k_start(struct ieee80211_hw *hw)
 				    ret);
 			goto err_core_stop;
 		}
-		ar->sifs_burst_enabled = false;
 	}
 
 	param = ar->wmi.pdev_param->ani_enable;
@@ -4671,8 +4668,7 @@ static int ath10k_mac_txpower_recalc(struct ath10k *ar)
 	lockdep_assert_held(&ar->conf_mutex);
 
 	list_for_each_entry(arvif, &ar->arvifs, list) {
-		if (arvif->txpower <= 0)
-			continue;
+		WARN_ON(arvif->txpower < 0);
 
 		if (txpower == -1)
 			txpower = arvif->txpower;
@@ -4680,8 +4676,8 @@ static int ath10k_mac_txpower_recalc(struct ath10k *ar)
 			txpower = min(txpower, arvif->txpower);
 	}
 
-	if (txpower == -1)
-		return 0;
+	if (WARN_ON(txpower == -1))
+		return -EINVAL;
 
 	ret = ath10k_mac_txpower_setup(ar, txpower);
 	if (ret) {
@@ -5190,10 +5186,6 @@ static void ath10k_remove_interface(struct ieee80211_hw *hw,
 		if (ret)
 			ath10k_warn(ar, "failed to recalc monitor: %d\n", ret);
 	}
-
-	ret = ath10k_mac_txpower_recalc(ar);
-	if (ret)
-		ath10k_warn(ar, "failed to recalc tx power: %d\n", ret);
 
 	spin_lock_bh(&ar->htt.tx_lock);
 	ath10k_mac_vif_tx_unlock_all(arvif);
@@ -7998,8 +7990,10 @@ int ath10k_mac_register(struct ath10k *ar)
 		goto err_free;
 	}
 
-	if (!test_bit(ATH10K_FLAG_RAW_MODE, &ar->dev_flags))
-		ar->hw->netdev_features = NETIF_F_HW_CSUM;
+	if (!QCA_REV_WCN3990(ar)) {
+		if (!test_bit(ATH10K_FLAG_RAW_MODE, &ar->dev_flags))
+			ar->hw->netdev_features = NETIF_F_HW_CSUM;
+	}
 
 	if (IS_ENABLED(CONFIG_ATH10K_DFS_CERTIFIED)) {
 		/* Init ath dfs pattern detector */

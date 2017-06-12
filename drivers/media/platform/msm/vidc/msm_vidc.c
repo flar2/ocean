@@ -110,34 +110,6 @@ int msm_vidc_enum_fmt(void *instance, struct v4l2_fmtdesc *f)
 }
 EXPORT_SYMBOL(msm_vidc_enum_fmt);
 
-int msm_vidc_query_ctrl(void *instance, struct v4l2_queryctrl *ctrl)
-{
-	struct msm_vidc_inst *inst = instance;
-	int rc = 0;
-
-	if (!inst || !ctrl)
-		return -EINVAL;
-
-	switch (ctrl->id) {
-	case V4L2_CID_MPEG_VIDC_VIDEO_HYBRID_HIERP_MODE:
-		ctrl->maximum = inst->capability.hier_p_hybrid.max;
-		ctrl->minimum = inst->capability.hier_p_hybrid.min;
-		break;
-	case V4L2_CID_MPEG_VIDC_VIDEO_HIER_B_NUM_LAYERS:
-		ctrl->maximum = inst->capability.hier_b.max;
-		ctrl->minimum = inst->capability.hier_b.min;
-		break;
-	case V4L2_CID_MPEG_VIDC_VIDEO_HIER_P_NUM_LAYERS:
-		ctrl->maximum = inst->capability.hier_p.max;
-		ctrl->minimum = inst->capability.hier_p.min;
-		break;
-	default:
-		rc = -EINVAL;
-	}
-	return rc;
-}
-EXPORT_SYMBOL(msm_vidc_query_ctrl);
-
 int msm_vidc_s_fmt(void *instance, struct v4l2_format *f)
 {
 	struct msm_vidc_inst *inst = instance;
@@ -970,7 +942,7 @@ int msm_vidc_dqbuf(void *instance, struct v4l2_buffer *b)
 		b->m.planes[i].m.userptr = buffer_info->uvaddr[i];
 		b->m.planes[i].reserved[0] = buffer_info->fd[i];
 		b->m.planes[i].reserved[1] = buffer_info->buff_off[i];
-		if (!(inst->flags & VIDC_SECURE) && !b->m.planes[i].m.userptr) {
+		if (!b->m.planes[i].m.userptr) {
 			dprintk(VIDC_ERR,
 			"%s: Failed to find user virtual address, %#lx, %d, %d\n",
 			__func__, b->m.planes[i].m.userptr, b->type, i);

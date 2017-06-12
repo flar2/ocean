@@ -487,18 +487,6 @@ static void diag_glink_remote_disconnect_work_fn(struct work_struct *work)
 	atomic_set(&glink_info->tx_intent_ready, 0);
 }
 
-static void diag_glink_late_init_work_fn(struct work_struct *work)
-{
-	struct diag_glink_info *glink_info = container_of(work,
-							struct diag_glink_info,
-							late_init_work);
-	if (!glink_info || !glink_info->hdl)
-		return;
-	DIAG_LOG(DIAG_DEBUG_PERIPHERALS, "p: %d t: %d\n",
-			glink_info->peripheral, glink_info->type);
-	diagfwd_channel_open(glink_info->fwd_ctxt);
-}
-
 static void diag_glink_transport_notify_state(void *handle, const void *priv,
 					  unsigned event)
 {
@@ -629,7 +617,7 @@ static void glink_late_init(struct diag_glink_info *glink_info)
 	glink_info->inited = 1;
 
 	if (atomic_read(&glink_info->opened))
-		queue_work(glink_info->wq, &(glink_info->late_init_work));
+		diagfwd_channel_open(glink_info->fwd_ctxt);
 
 	DIAG_LOG(DIAG_DEBUG_PERIPHERALS, "%s exiting\n",
 		 glink_info->name);
@@ -677,7 +665,6 @@ static void __diag_glink_init(struct diag_glink_info *glink_info)
 	INIT_WORK(&(glink_info->connect_work), diag_glink_connect_work_fn);
 	INIT_WORK(&(glink_info->remote_disconnect_work),
 		diag_glink_remote_disconnect_work_fn);
-	INIT_WORK(&(glink_info->late_init_work), diag_glink_late_init_work_fn);
 	link_info.glink_link_state_notif_cb = diag_glink_notify_cb;
 	link_info.transport = NULL;
 	link_info.edge = glink_info->edge;

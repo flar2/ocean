@@ -68,7 +68,8 @@ static void dump_mem(const char *lvl, const char *str, unsigned long bottom,
 
 	/*
 	 * We need to switch to kernel mode so that we can use __get_user
-	 * to safely read from kernel space.
+	 * to safely read from kernel space.  Note that we now dump the
+	 * code first, just in case the backtrace kills us.
 	 */
 	fs = get_fs();
 	set_fs(KERNEL_DS);
@@ -114,11 +115,20 @@ static void dump_backtrace_entry(unsigned long where)
 	print_ip_sym(where);
 }
 
-static void __dump_instr(const char *lvl, struct pt_regs *regs)
+static void dump_instr(const char *lvl, struct pt_regs *regs)
 {
 	unsigned long addr = instruction_pointer(regs);
+	mm_segment_t fs;
 	char str[sizeof("00000000 ") * 5 + 2 + 1], *p = str;
 	int i;
+
+	/*
+	 * We need to switch to kernel mode so that we can use __get_user
+	 * to safely read from kernel space.  Note that we now dump the
+	 * code first, just in case the backtrace kills us.
+	 */
+	fs = get_fs();
+	set_fs(KERNEL_DS);
 
 	for (i = -4; i < 1; i++) {
 		unsigned int val, bad;
@@ -133,18 +143,8 @@ static void __dump_instr(const char *lvl, struct pt_regs *regs)
 		}
 	}
 	printk("%sCode: %s\n", lvl, str);
-}
 
-static void dump_instr(const char *lvl, struct pt_regs *regs)
-{
-	if (!user_mode(regs)) {
-		mm_segment_t fs = get_fs();
-		set_fs(KERNEL_DS);
-		__dump_instr(lvl, regs);
-		set_fs(fs);
-	} else {
-		__dump_instr(lvl, regs);
-	}
+	set_fs(fs);
 }
 
 static void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk)
@@ -295,6 +295,12 @@ static unsigned long oops_begin(void)
 
 static void oops_end(unsigned long flags, struct pt_regs *regs, int notify)
 {
+#if defined(CONFIG_HTC_DEBUG_KP)
+	struct thread_info *thread = current_thread_info();
+	char sym_pc[KSYM_SYMBOL_LEN];
+	char sym_lr[KSYM_SYMBOL_LEN];
+#endif
+
 	if (regs && kexec_should_crash(current))
 		crash_kexec(regs);
 
@@ -308,10 +314,23 @@ static void oops_end(unsigned long flags, struct pt_regs *regs, int notify)
 	raw_local_irq_restore(flags);
 	oops_exit();
 
+#if defined(CONFIG_HTC_DEBUG_KP)
+	sprint_symbol(sym_pc, regs->pc);
+	sprint_symbol(sym_lr, (compat_user_mode(regs))? regs->compat_lr:regs->regs[30]);
+#endif
+
 	if (in_interrupt())
+#if defined(CONFIG_HTC_DEBUG_KP)
+		panic("%.*s PC:%s LR:%s", TASK_COMM_LEN, thread->task->comm, sym_pc, sym_lr);
+#else
 		panic("Fatal exception in interrupt");
+#endif
 	if (panic_on_oops)
+#if defined(CONFIG_HTC_DEBUG_KP)
+		panic("%.*s PC:%s LR:%s", TASK_COMM_LEN, thread->task->comm, sym_pc, sym_lr);
+#else
 		panic("Fatal exception");
+#endif
 	if (notify != NOTIFY_STOP)
 		do_exit(SIGSEGV);
 }
@@ -505,43 +524,20 @@ static const char *esr_class_str[] = {
 
 const char *esr_get_class_string(u32 esr)
 {
-	return esr_class_str[ESR_ELx_EC(esr)];
+	return esr_class_str[esr >> ESR_ELx_EC_SHIFT];
 }
 
 /*
- * bad_mode handles the impossible case in the exception vector. This is always
- * fatal.
+ * bad_mode handles the impossible case in the exception vector.
  */
 asmlinkage void bad_mode(struct pt_regs *regs, int reason, unsigned int esr)
-{
-	console_verbose();
-
-	pr_crit("Bad mode in %s handler detected, code 0x%08x -- %s\n",
-		handler[reason], esr, esr_get_class_string(esr));
-
-	if (esr >> ESR_ELx_EC_SHIFT == ESR_ELx_EC_SERROR) {
-		pr_crit("System error detected. ESR.ISS = %08x\n",
-			esr & 0xffffff);
-		arm64_check_cache_ecc(NULL);
-	}
-
-	die("Oops - bad mode", regs, 0);
-	local_irq_disable();
-	panic("bad mode");
-}
-
-/*
- * bad_el0_sync handles unexpected, but potentially recoverable synchronous
- * exceptions taken from EL0. Unlike bad_mode, this returns.
- */
-asmlinkage void bad_el0_sync(struct pt_regs *regs, int reason, unsigned int esr)
 {
 	siginfo_t info;
 	void __user *pc = (void __user *)instruction_pointer(regs);
 	console_verbose();
 
-	pr_crit("Bad EL0 synchronous exception detected on CPU%d, code 0x%08x -- %s\n",
-		smp_processor_id(), esr, esr_get_class_string(esr));
+	pr_crit("Bad mode in %s handler detected, code 0x%08x -- %s\n",
+		handler[reason], esr, esr_get_class_string(esr));
 	__show_regs(regs);
 
 	info.si_signo = SIGILL;
@@ -549,10 +545,13 @@ asmlinkage void bad_el0_sync(struct pt_regs *regs, int reason, unsigned int esr)
 	info.si_code  = ILL_ILLOPC;
 	info.si_addr  = pc;
 
-	current->thread.fault_address = 0;
-	current->thread.fault_code = 0;
+	if (esr >> ESR_ELx_EC_SHIFT == ESR_ELx_EC_SERROR) {
+		pr_crit("System error detected. ESR.ISS = %08x\n",
+			esr & 0xffffff);
+		arm64_check_cache_ecc(NULL);
+	}
 
-	force_sig_info(info.si_signo, &info, current);
+	arm64_notify_die("Oops - bad mode", regs, &info, 0);
 }
 
 void __pte_error(const char *file, int line, unsigned long val)

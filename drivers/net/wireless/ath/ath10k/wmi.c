@@ -1799,9 +1799,6 @@ int ath10k_wmi_cmd_send(struct ath10k *ar, struct sk_buff *skb, u32 cmd_id)
 {
 	int ret = -EOPNOTSUPP;
 
-	if (test_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags))
-		return -ESHUTDOWN;
-
 	might_sleep();
 
 	if (cmd_id == WMI_CMD_UNSUPPORTED) {

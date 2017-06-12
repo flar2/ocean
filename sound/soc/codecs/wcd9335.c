@@ -4945,7 +4945,13 @@ static int tasha_codec_enable_spline_src(struct snd_soc_codec *codec,
 					 int src_num,
 					 int event)
 {
+/* HTC_AUD_START Fix Klockwork */
+#if 0
+	u16 src_paired_reg;
+#else
 	u16 src_paired_reg = 0;
+#endif
+/* HTC_AUD_END */
 	struct tasha_priv *tasha;
 	u16 rx_path_cfg_reg = WCD9335_CDC_RX1_RX_PATH_CFG0;
 	u16 rx_path_ctl_reg = WCD9335_CDC_RX1_RX_PATH_CTL;

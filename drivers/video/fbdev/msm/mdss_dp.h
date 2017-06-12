@@ -617,6 +617,7 @@ struct mdss_dp_drv_pdata {
 	struct completion notification_comp;
 	struct mutex aux_mutex;
 	struct mutex train_mutex;
+	struct mutex pd_msg_mutex;
 	struct mutex attention_lock;
 	struct mutex hdcp_mutex;
 	bool cable_connected;

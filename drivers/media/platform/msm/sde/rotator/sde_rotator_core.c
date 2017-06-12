@@ -515,12 +515,6 @@ static int sde_rotator_import_buffer(struct sde_layer_buffer *buffer,
 	if (!input)
 		dir = DMA_FROM_DEVICE;
 
-	if (buffer->plane_count > SDE_ROT_MAX_PLANES) {
-		SDEROT_ERR("buffer plane_count exceeds MAX_PLANE limit:%d\n",
-				buffer->plane_count);
-		return -EINVAL;
-	}
-
 	memset(planes, 0, sizeof(planes));
 
 	for (i = 0; i < buffer->plane_count; i++) {
@@ -1981,7 +1975,7 @@ static void sde_rotator_cancel_request(struct sde_rot_mgr *mgr,
 	devm_kfree(&mgr->pdev->dev, req);
 }
 
-void sde_rotator_cancel_all_requests(struct sde_rot_mgr *mgr,
+static void sde_rotator_cancel_all_requests(struct sde_rot_mgr *mgr,
 	struct sde_rot_file_private *private)
 {
 	struct sde_rot_entry_container *req, *req_next;
@@ -2425,7 +2419,6 @@ static int sde_rotator_parse_dt_bus(struct sde_rot_mgr *mgr,
 {
 	int ret = 0, i;
 	int usecases;
-	struct sde_rot_data_type *mdata = sde_rot_get_mdata();
 
 	mgr->data_bus.bus_scale_pdata = msm_bus_cl_get_pdata(dev);
 	if (IS_ERR_OR_NULL(mgr->data_bus.bus_scale_pdata)) {
@@ -2438,16 +2431,12 @@ static int sde_rotator_parse_dt_bus(struct sde_rot_mgr *mgr,
 		}
 	}
 
-	if (mdata && mdata->reg_bus_pdata) {
-		mgr->reg_bus.bus_scale_pdata = mdata->reg_bus_pdata;
-	} else {
-		mgr->reg_bus.bus_scale_pdata = &rot_reg_bus_scale_table;
-		usecases = mgr->reg_bus.bus_scale_pdata->num_usecases;
-		for (i = 0; i < usecases; i++) {
-			rot_reg_bus_usecases[i].num_paths = 1;
-			rot_reg_bus_usecases[i].vectors =
-				&rot_reg_bus_vectors[i];
-		}
+	mgr->reg_bus.bus_scale_pdata = &rot_reg_bus_scale_table;
+	usecases = mgr->reg_bus.bus_scale_pdata->num_usecases;
+	for (i = 0; i < usecases; i++) {
+		rot_reg_bus_usecases[i].num_paths = 1;
+		rot_reg_bus_usecases[i].vectors =
+			&rot_reg_bus_vectors[i];
 	}
 
 	return ret;

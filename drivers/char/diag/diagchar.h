@@ -22,6 +22,7 @@
 #include <linux/workqueue.h>
 #include <linux/sched.h>
 #include <linux/wakelock.h>
+#include <linux/usb/usbdiag.h>
 #include <soc/qcom/smd.h>
 #include <asm/atomic.h>
 #include "diagfwd_bridge.h"
@@ -50,6 +51,9 @@
 
 #define ALL_PROC		-1
 
+#define MODEM_PROC		0
+#define LPASS_PROC		2
+#define WCNSS_PROC		3
 #define REMOTE_DATA		4
 
 #define USER_SPACE_DATA		16384
@@ -64,21 +68,14 @@
 #define DIAG_CON_LPASS		(0x0004)	/* Bit mask for LPASS */
 #define DIAG_CON_WCNSS		(0x0008)	/* Bit mask for WCNSS */
 #define DIAG_CON_SENSORS	(0x0010)	/* Bit mask for Sensors */
-#define DIAG_CON_WDSP		(0x0020)	/* Bit mask for WDSP */
-#define DIAG_CON_CDSP		(0x0040)	/* Bit mask for CDSP */
-
-#define DIAG_CON_UPD_WLAN		(0x1000) /*Bit mask for WLAN PD*/
-#define DIAG_CON_UPD_AUDIO		(0x2000) /*Bit mask for AUDIO PD*/
-#define DIAG_CON_UPD_SENSORS	(0x4000) /*Bit mask for SENSORS PD*/
+#define DIAG_CON_WDSP (0x0020) /* Bit mask for WDSP */
+#define DIAG_CON_CDSP (0x0040)
 
 #define DIAG_CON_NONE		(0x0000)	/* Bit mask for No SS*/
 #define DIAG_CON_ALL		(DIAG_CON_APSS | DIAG_CON_MPSS \
 				| DIAG_CON_LPASS | DIAG_CON_WCNSS \
 				| DIAG_CON_SENSORS | DIAG_CON_WDSP \
 				| DIAG_CON_CDSP)
-#define DIAG_CON_UPD_ALL	(DIAG_CON_UPD_WLAN \
-				| DIAG_CON_UPD_AUDIO \
-				| DIAG_CON_UPD_SENSORS)
 
 #define DIAG_STM_MODEM	0x01
 #define DIAG_STM_LPASS	0x02
@@ -172,7 +169,7 @@
 #define PKT_ALLOC	1
 #define PKT_RESET	2
 
-#define FEATURE_MASK_LEN	4
+#define FEATURE_MASK_LEN	2
 
 #define DIAG_MD_NONE			0
 #define DIAG_MD_PERIPHERAL		1
@@ -216,22 +213,8 @@
 #define NUM_PERIPHERALS		6
 #define APPS_DATA		(NUM_PERIPHERALS)
 
-#define UPD_WLAN		7
-#define UPD_AUDIO		8
-#define UPD_SENSORS		9
-#define NUM_UPD			3
-
-#define DIAG_ID_APPS		1
-#define DIAG_ID_MPSS		2
-#define DIAG_ID_WLAN		3
-#define DIAG_ID_LPASS		4
-#define DIAG_ID_CDSP		5
-#define DIAG_ID_AUDIO		6
-#define DIAG_ID_SENSORS		7
-
 /* Number of sessions possible in Memory Device Mode. +1 for Apps data */
-#define NUM_MD_SESSIONS		(NUM_PERIPHERALS \
-					+ NUM_UPD + 1)
+#define NUM_MD_SESSIONS		(NUM_PERIPHERALS + 1)
 
 #define MD_PERIPHERAL_MASK(x)	(1 << x)
 
@@ -282,6 +265,8 @@
 enum remote_procs {
 	MDM = 1,
 	MDM2 = 2,
+	MDM3 = 3,
+	MDM4 = 4,
 	QSC = 5,
 };
 
@@ -353,6 +338,7 @@ struct diag_cmd_reg_tbl_t {
 struct diag_client_map {
 	char name[20];
 	int pid;
+	int timeout;
 };
 
 struct real_time_vote_t {
@@ -428,7 +414,6 @@ struct diag_partial_pkt_t {
 struct diag_logging_mode_param_t {
 	uint32_t req_mode;
 	uint32_t peripheral_mask;
-	uint32_t pd_mask;
 	uint8_t mode_param;
 } __packed;
 
@@ -440,7 +425,6 @@ struct diag_md_session_t {
 	struct diag_mask_info *msg_mask;
 	struct diag_mask_info *log_mask;
 	struct diag_mask_info *event_mask;
-	struct thread_info *md_client_thread_info;
 	struct task_struct *task;
 };
 
@@ -476,7 +460,6 @@ struct diag_feature_t {
 	uint8_t log_on_demand;
 	uint8_t separate_cmd_rsp;
 	uint8_t encode_hdlc;
-	uint8_t untag_header;
 	uint8_t peripheral_buffering;
 	uint8_t mask_centralization;
 	uint8_t stm_support;
@@ -508,8 +491,6 @@ struct diagchar_dev {
 	int use_device_tree;
 	int supports_separate_cmdrsp;
 	int supports_apps_hdlc_encoding;
-	int supports_apps_header_untagging;
-	int peripheral_untag[NUM_PERIPHERALS];
 	int supports_sockets;
 	/* The state requested in the STM command */
 	int stm_state_requested[NUM_STM_PROCESSORS];
@@ -541,7 +522,6 @@ struct diagchar_dev {
 	struct mutex cmd_reg_mutex;
 	uint32_t cmd_reg_count;
 	struct mutex diagfwd_channel_mutex[NUM_PERIPHERALS];
-	struct mutex diagfwd_untag_mutex;
 	/* Sizes that reflect memory pool sizes */
 	unsigned int poolsize;
 	unsigned int poolsize_hdlc;
@@ -604,15 +584,6 @@ struct diagchar_dev {
 	int in_busy_dcipktdata;
 	int logging_mode;
 	int logging_mask;
-	int pd_logging_mode[NUM_UPD];
-	int pd_session_clear[NUM_UPD];
-	int num_pd_session;
-	int cpd_len_1[NUM_PERIPHERALS];
-	int cpd_len_2[NUM_PERIPHERALS];
-	int upd_len_1_a[NUM_PERIPHERALS];
-	int upd_len_1_b[NUM_PERIPHERALS];
-	int upd_len_2_a;
-	int upd_len_2_b;
 	int mask_check;
 	uint32_t md_session_mask;
 	uint8_t md_session_mode;
@@ -621,16 +592,19 @@ struct diagchar_dev {
 	/* Power related variables */
 	struct diag_ws_ref_t dci_ws;
 	struct diag_ws_ref_t md_ws;
+	/* HTC related variables */
+	int qxdm2sd_drop;
+	int qxdmusb_drop;
+	struct timeval st0;
+	struct timeval st1;
 	/* Pointers to Diag Masks */
 	struct diag_mask_info *msg_mask;
 	struct diag_mask_info *log_mask;
 	struct diag_mask_info *event_mask;
 	struct diag_mask_info *build_time_mask;
 	uint8_t msg_mask_tbl_count;
-	uint8_t bt_msg_mask_tbl_count;
 	uint16_t event_mask_size;
 	uint16_t last_event_id;
-	struct mutex msg_mask_lock;
 	/* Variables for Mask Centralization */
 	uint16_t num_event_id[NUM_PERIPHERALS];
 	uint32_t num_equip_id[NUM_PERIPHERALS];
@@ -645,6 +619,18 @@ struct diagchar_dev {
 };
 
 extern struct diagchar_dev *driver;
+
+#define DIAG_DBG_READ	1
+#define DIAG_DBG_WRITE	2
+#define DIAG_DBG_DROP	3
+extern unsigned diag7k_debug_mask;
+extern unsigned diag9k_debug_mask;
+#define DIAGFWD_7K_RAWDATA(buf, src, flag) \
+	__diagfwd_dbg_raw_data(buf, src, flag, diag7k_debug_mask)
+#define DIAGFWD_9K_RAWDATA(buf, src, flag) \
+	__diagfwd_dbg_raw_data(buf, src, flag, diag9k_debug_mask)
+void __diagfwd_dbg_raw_data(void *buf, const char *src, unsigned dbg_flag, unsigned mask);
+
 
 extern int wrap_enabled;
 extern uint16_t wrap_count;

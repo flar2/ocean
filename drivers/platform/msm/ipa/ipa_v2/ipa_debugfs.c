@@ -80,9 +80,6 @@ const char *ipa_event_name[] = {
 	__stringify(ECM_DISCONNECT),
 	__stringify(IPA_TETHERING_STATS_UPDATE_STATS),
 	__stringify(IPA_TETHERING_STATS_UPDATE_NETWORK_STATS),
-	__stringify(IPA_QUOTA_REACH),
-	__stringify(IPA_SSR_BEFORE_SHUTDOWN),
-	__stringify(IPA_SSR_AFTER_POWERUP),
 };
 
 const char *ipa_hdr_l2_type_name[] = {
@@ -126,7 +123,6 @@ static struct dentry *dfile_ipa_poll_iteration;
 static char dbg_buff[IPA_MAX_MSG_LEN];
 static char *active_clients_buf;
 static s8 ep_reg_idx;
-static void *ipa_ipc_low_buff;
 
 int _ipa_read_gen_reg_v1_1(char *buff, int max_len)
 {
@@ -1827,20 +1823,23 @@ static ssize_t ipa_enable_ipc_low(struct file *file,
 	if (kstrtos8(dbg_buff, 0, &option))
 		return -EFAULT;
 
-	mutex_lock(&ipa_ctx->lock);
 	if (option) {
-		if (!ipa_ipc_low_buff) {
-			ipa_ipc_low_buff =
+		if (!ipa_ctx->logbuf_low) {
+			ipa_ctx->logbuf_low =
 				ipc_log_context_create(IPA_IPC_LOG_PAGES,
 				"ipa_low", 0);
-			if (ipa_ipc_low_buff == NULL)
-				IPAERR("failed to get logbuf_low\n");
 		}
-		ipa_ctx->logbuf_low = ipa_ipc_low_buff;
+
+		if (ipa_ctx->logbuf_low == NULL) {
+			IPAERR("failed to get logbuf_low\n");
+			return -EFAULT;
+		}
+
 	} else {
-		ipa_ctx->logbuf_low = NULL;
+		if (ipa_ctx->logbuf_low)
+			ipc_log_context_destroy(ipa_ctx->logbuf_low);
+			ipa_ctx->logbuf_low = NULL;
 	}
-	mutex_unlock(&ipa_ctx->lock);
 
 	return count;
 }

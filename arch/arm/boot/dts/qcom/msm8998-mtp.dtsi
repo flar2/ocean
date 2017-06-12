@@ -11,8 +11,9 @@
  */
 
 #include <dt-bindings/interrupt-controller/irq.h>
-#include "msm8998-camera-sensor-mtp.dtsi"
-&vendor {
+#include "msm8998-pinctrl.dtsi"
+//#include "msm8998-camera-sensor-mtp.dtsi"
+/ {
 	bluetooth: bt_wcn3990 {
 		compatible = "qca,wcn3990";
 		qca,bt-vdd-io-supply = <&pm8998_s3>;
@@ -88,6 +89,7 @@
 	qcom,bus-speed-mode = "SDR12", "SDR25", "SDR50", "DDR50", "SDR104";
 
 	cd-gpios = <&tlmm 95 0x1>;
+	htc,slot-type = <1>;
 
 	status = "ok";
 };
@@ -102,14 +104,14 @@
 	/* GPIO 2 for Home Key */
 	gpio@c100 {
 		status = "okay";
-		qcom,mode = <0>;
-		qcom,pull = <0>;
+		qcom,mode = <1>;
+		qcom,pull = <4>;
 		qcom,vin-sel = <0>;
 		qcom,src-sel = <0>;
 		qcom,out-strength = <1>;
 	};
 
-	/* GPIO 6 for Vol+ Key */
+/*	GPIO 6 for Vol+ Key
 	gpio@c500 {
 		status = "okay";
 		qcom,mode = <0>;
@@ -118,7 +120,7 @@
 		qcom,src-sel = <0>;
 		qcom,out-strength = <1>;
 	};
-
+*/
 	/* GPIO 7 for Snapshot Key */
 	gpio@c600 {
 		status = "okay";
@@ -291,19 +293,6 @@
 	qcom,led-strings-list = [00 01];
 };
 
-&red_led {
-	/delete-property/ linux,default-trigger;
-	qcom,start-idx = <0>;
-	qcom,idx-len = <10>;
-	qcom,duty-pcts = [00 19 32 4b 64
-			64 4b 32 19 00];
-	qcom,use-blink;
-};
-
-&green_led {
-	/delete-property/ linux,default-trigger;
-};
-
 &dsi_dual_nt35597_video {
 	qcom,mdss-dsi-bl-pmic-control-type = "bl_ctrl_wled";
 	qcom,mdss-dsi-bl-min-level = <1>;
@@ -318,8 +307,6 @@
 	qcom,mdss-dsi-bl-max-level = <4095>;
 	qcom,mdss-dsi-mode-sel-gpio-state = "dual_port";
 	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
-	qcom,partial-update-enabled = "single_roi";
-	qcom,panel-roi-alignment = <720 128 720 128 1440 128>;
 };
 
 &dsi_dual_nt35597_truly_video {
@@ -417,7 +404,7 @@
 	qcom,mdss-dsi-bl-pmic-control-type = "bl_ctrl_wled";
 	qcom,mdss-dsi-bl-min-level = <1>;
 	qcom,mdss-dsi-bl-max-level = <4095>;
-	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
+	qcom,panel-supply-entries = <&dsi_panel_pwr_supply_no_labibb>;
 };
 
 &dsi_dual_sim_cmd {
@@ -487,6 +474,17 @@
 		qcom,fast-avg-setup = <0>;
 	};
 
+        chan@4e {
+                label = "emmc_therm";
+                reg = <0x4e>;
+                qcom,decimation = <2>;
+                qcom,pre-div-channel-scaling = <0>;
+                qcom,calibration-type = "ratiometric";
+                qcom,scale-function = <2>;
+                qcom,hw-settle-time = <2>;
+                qcom,fast-avg-setup = <0>;
+        };
+
 	chan@51 {
 		label = "quiet_therm";
 		reg = <0x51>;
@@ -542,6 +540,17 @@
 		qcom,btm-channel-number = <0x78>;
 		qcom,thermal-node;
 	};
+
+		chan@4e {
+                label = "emmc_therm";
+                reg = <0x4e>;
+                qcom,pre-div-channel-scaling = <0>;
+                qcom,calibration-type = "ratiometric";
+                qcom,scale-function = <2>;
+                qcom,hw-settle-time = <2>;
+                qcom,btm-channel-number = <0x80>;
+                qcom,thermal-node;
+        };
 };
 
 &wil6210 {
@@ -587,7 +596,7 @@
 	};
 };
 
-&vendor {
+/{
 	mtp_batterydata: qcom,battery-data {
 		qcom,batt-id-range-pct = <15>;
 		#include "fg-gen3-batterydata-itech-3000mah.dtsi"

@@ -43,6 +43,8 @@
 static DEFINE_IDR(mmc_host_idr);
 static DEFINE_SPINLOCK(mmc_host_lock);
 
+extern struct workqueue_struct *stats_workqueue;
+
 static void mmc_host_classdev_release(struct device *dev)
 {
 	struct mmc_host *host = cls_dev_to_mmc_host(dev);
@@ -609,6 +611,7 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 	spin_lock_init(&host->lock);
 	init_waitqueue_head(&host->wq);
 	INIT_DELAYED_WORK(&host->detect, mmc_rescan);
+	INIT_DELAYED_WORK(&host->stats_work, mmc_stats);
 #ifdef CONFIG_PM
 	host->pm_notify.notifier_call = mmc_pm_notify;
 #endif
@@ -653,19 +656,19 @@ static ssize_t store_enable(struct device *dev,
 	mmc_get_card(host->card);
 
 	if (!value) {
-		/* Suspend the clock scaling and mask host capability */
-		if (host->clk_scaling.enable)
-			mmc_suspend_clk_scaling(host);
+		/*turning off clock scaling*/
+		mmc_exit_clk_scaling(host);
 		host->caps2 &= ~MMC_CAP2_CLK_SCALE;
 		host->clk_scaling.state = MMC_LOAD_HIGH;
 		/* Set to max. frequency when disabling */
 		mmc_clk_update_freq(host, host->card->clk_scaling_highest,
 					host->clk_scaling.state);
 	} else if (value) {
-		/* Unmask host capability and resume scaling */
+		/* starting clock scaling, will restart in case started */
 		host->caps2 |= MMC_CAP2_CLK_SCALE;
-		if (!host->clk_scaling.enable)
-			mmc_resume_clk_scaling(host);
+		if (host->clk_scaling.enable)
+			mmc_exit_clk_scaling(host);
+		mmc_init_clk_scaling(host);
 	}
 
 	mmc_put_card(host->card);
@@ -814,6 +817,8 @@ set_perf(struct device *dev, struct device_attribute *attr,
 	unsigned long flags;
 
 	sscanf(buf, "%lld", &value);
+	host->debug_mask = value;
+	pr_info("%s: set debug 0x%llx\n", mmc_hostname(host), value);
 	spin_lock_irqsave(&host->lock, flags);
 	if (!value) {
 		memset(&host->perf, 0, sizeof(host->perf));
@@ -883,9 +888,7 @@ int mmc_add_host(struct mmc_host *host)
 		pr_err("%s: failed to create sysfs group with err %d\n",
 							 __func__, err);
 
-#ifdef CONFIG_BLOCK
 	mmc_latency_hist_sysfs_init(host);
-#endif
 
 	mmc_start_host(host);
 	if (!(host->pm_flags & MMC_PM_IGNORE_PM_NOTIFY))
@@ -917,9 +920,7 @@ void mmc_remove_host(struct mmc_host *host)
 	sysfs_remove_group(&host->parent->kobj, &dev_attr_grp);
 	sysfs_remove_group(&host->class_dev.kobj, &clk_scaling_attr_grp);
 
-#ifdef CONFIG_BLOCK
 	mmc_latency_hist_sysfs_exit(host);
-#endif
 
 	device_del(&host->class_dev);
 

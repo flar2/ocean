@@ -1,4 +1,4 @@
-/* Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -12,7 +12,6 @@
 
 #include <dt-bindings/spmi/spmi.h>
 #include <dt-bindings/interrupt-controller/irq.h>
-#include <dt-bindings/msm/power-on.h>
 
 &spmi_bus {
 	qcom,pm8998@0 {
@@ -43,6 +42,10 @@
 				qcom,pon-type = <0>;
 				qcom,pull-up = <1>;
 				linux,code = <116>;
+				qcom,support-reset = <1>;
+				qcom,s1-timer = <10256>;
+				qcom,s2-timer = <2000>;
+				qcom,s2-type = <1>;
 			};
 
 			qcom,pon_2 {
@@ -57,7 +60,7 @@
 				qcom,pull-up = <1>;
 				qcom,s1-timer = <6720>;
 				qcom,s2-timer = <2000>;
-				qcom,s2-type = <PON_POWER_OFF_DVDD_HARD_RESET>;
+				qcom,s2-type = <7>;
 				qcom,use-bark;
 			};
 		};
@@ -88,7 +91,9 @@
 			gpio@c100 {
 				reg = <0xc100 0x100>;
 				qcom,pin-num = <2>;
-				status = "disabled";
+				status = "okay";
+				qcom,mode = <1>;
+				qcom,pull = <4>;
 			};
 
 			gpio@c200 {
@@ -108,13 +113,13 @@
 				qcom,pin-num = <5>;
 				status = "disabled";
 			};
-
+/*
 			gpio@c500 {
 				reg = <0xc500 0x100>;
 				qcom,pin-num = <6>;
 				status = "disabled";
 			};
-
+*/
 			gpio@c600 {
 				reg = <0xc600 0x100>;
 				qcom,pin-num = <7>;
@@ -136,7 +141,12 @@
 			gpio@c900 {
 				reg = <0xc900 0x100>;
 				qcom,pin-num = <10>;
-				status = "disabled";
+				status = "okay";
+				qcom,mode = <0>;
+				qcom,pull = <5>;
+				qcom,vin-sel = <0>;
+				qcom,src-sel = <0>;
+				qcom,master-en = <1>;
 			};
 
 			gpio@ca00 {
@@ -148,7 +158,12 @@
 			gpio@cb00 {
 				reg = <0xcb00 0x100>;
 				qcom,pin-num = <12>;
-				status = "disabled";
+				status = "okay";
+				qcom,mode = <0>;
+				qcom,pull = <5>;
+				qcom,vin-sel = <0>;
+				qcom,src-sel = <0>;
+				qcom,master-en = <1>;
 			};
 
 			gpio@cc00 {
@@ -208,7 +223,12 @@
 			gpio@d500 {
 				reg = <0xd500 0x100>;
 				qcom,pin-num = <22>;
-				status = "disabled";
+				status = "okay";
+				qcom,mode = <0>;
+				qcom,pull = <5>;
+				qcom,vin-sel = <0>;
+				qcom,src-sel = <0>;
+				qcom,master-en = <1>;
 			};
 
 			gpio@d600 {
@@ -239,6 +259,7 @@
 		pm8998_coincell: qcom,coincell@2800 {
 			compatible = "qcom,qpnp-coincell";
 			reg = <0x2800 0x100>;
+			qcom,charge-enable = <1>;
 		};
 
 		pm8998_rtc: qcom,pm8998_rtc {
@@ -300,6 +321,18 @@
 				qcom,scale-function = <0>;
 				qcom,hw-settle-time = <0>;
 				qcom,fast-avg-setup = <0>;
+				qcom,cal-val = <0>;
+			};
+
+			chan@16 {       //GPIO12
+				label = "usb_conn_temp";
+				reg = <0x16>;
+				qcom,decimation = <0>;
+				qcom,pre-div-channel-scaling = <0>;
+				qcom,calibration-type = "ratiometric";
+				qcom,scale-function = <0>;
+				qcom,hw-settle-time = <1>;
+				qcom,fast-avg-setup = <2>;
 				qcom,cal-val = <0>;
 			};
 		};

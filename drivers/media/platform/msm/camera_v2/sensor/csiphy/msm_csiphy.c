@@ -720,6 +720,13 @@ static int msm_csiphy_2phase_lane_config_v50(
 		}
 	}
 	msm_csiphy_cphy_irq_config(csiphy_dev, csiphy_params);
+	//HTC_START: QCT provides SW workaround to fix white line noise.
+	msm_camera_io_w(0x4, csiphybase + 0X24);
+	msm_camera_io_w(0x4, csiphybase + 0X224);
+	msm_camera_io_w(0x4, csiphybase + 0X424);
+	msm_camera_io_w(0x4, csiphybase + 0X624);
+	msm_camera_io_w(0x4, csiphybase + 0X724);
+	//HTC_END
 	return 0;
 }
 
@@ -1069,7 +1076,7 @@ static int msm_csiphy_init(struct csiphy_device *csiphy_dev)
 	if (rc < 0) {
 		pr_err("%s:%d csiphy config_vreg failed\n",
 			__func__, __LINE__);
-		goto csiphy_vreg_config_fail;
+		goto csiphy_resource_fail;
 	}
 	rc = msm_camera_enable_vreg(&csiphy_dev->pdev->dev,
 		csiphy_dev->csiphy_vreg,
@@ -1089,7 +1096,7 @@ static int msm_csiphy_init(struct csiphy_device *csiphy_dev)
 	if (rc < 0) {
 		pr_err("%s: csiphy clk enable failed\n", __func__);
 		csiphy_dev->ref_count--;
-		goto csiphy_enable_clk_fail;
+		goto csiphy_resource_fail;
 	}
 	CDBG("%s:%d called\n", __func__, __LINE__);
 
@@ -1117,17 +1124,12 @@ static int msm_csiphy_init(struct csiphy_device *csiphy_dev)
 	csiphy_dev->csiphy_state = CSIPHY_POWER_UP;
 	return 0;
 
-csiphy_enable_clk_fail:
-	msm_camera_enable_vreg(&csiphy_dev->pdev->dev,
-		csiphy_dev->csiphy_vreg,
-		csiphy_dev->regulator_count, NULL, 0,
-		&csiphy_dev->csiphy_reg_ptr[0], 0);
 top_vreg_enable_failed:
 	msm_camera_config_vreg(&csiphy_dev->pdev->dev,
 		csiphy_dev->csiphy_vreg,
 		csiphy_dev->regulator_count, NULL, 0,
 		&csiphy_dev->csiphy_reg_ptr[0], 0);
-csiphy_vreg_config_fail:
+csiphy_resource_fail:
 	if (cam_config_ahb_clk(NULL, 0, CAM_AHB_CLIENT_CSIPHY,
 		CAM_AHB_SUSPEND_VOTE) < 0)
 		pr_err("%s: failed to vote for AHB\n", __func__);
@@ -1174,7 +1176,7 @@ static int msm_csiphy_init(struct csiphy_device *csiphy_dev)
 	if (rc < 0) {
 		pr_err("%s:%d csiphy config_vreg failed\n",
 			__func__, __LINE__);
-		goto csiphy_vreg_config_fail;
+		goto csiphy_resource_fail;
 	}
 	rc = msm_camera_enable_vreg(&csiphy_dev->pdev->dev,
 		csiphy_dev->csiphy_vreg,
@@ -1194,7 +1196,7 @@ static int msm_csiphy_init(struct csiphy_device *csiphy_dev)
 	if (rc < 0) {
 		pr_err("%s: csiphy clk enable failed\n", __func__);
 		csiphy_dev->ref_count--;
-		goto csiphy_enable_clk_fail;
+		goto csiphy_resource_fail;
 	}
 	CDBG("%s:%d clk enable success\n", __func__, __LINE__);
 
@@ -1218,18 +1220,12 @@ static int msm_csiphy_init(struct csiphy_device *csiphy_dev)
 		csiphy_dev->hw_version);
 	csiphy_dev->csiphy_state = CSIPHY_POWER_UP;
 	return 0;
-
-csiphy_enable_clk_fail:
-	msm_camera_enable_vreg(&csiphy_dev->pdev->dev,
-		csiphy_dev->csiphy_vreg,
-		csiphy_dev->regulator_count, NULL, 0,
-		&csiphy_dev->csiphy_reg_ptr[0], 0);
 top_vreg_enable_failed:
 	msm_camera_config_vreg(&csiphy_dev->pdev->dev,
 		csiphy_dev->csiphy_vreg,
 		csiphy_dev->regulator_count, NULL, 0,
 		&csiphy_dev->csiphy_reg_ptr[0], 0);
-csiphy_vreg_config_fail:
+csiphy_resource_fail:
 	if (cam_config_ahb_clk(NULL, 0, CAM_AHB_CLIENT_CSIPHY,
 		CAM_AHB_SUSPEND_VOTE) < 0)
 		pr_err("%s: failed to vote for AHB\n", __func__);

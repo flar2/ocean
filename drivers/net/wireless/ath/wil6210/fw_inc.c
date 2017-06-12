@@ -554,7 +554,5 @@ bool wil_fw_verify_file_exists(struct wil6210_priv *wil, const char *name)
 	rc = request_firmware(&fw, name, wil_to_dev(wil));
 	if (!rc)
 		release_firmware(fw);
-	else
-		wil_dbg_fw(wil, "<%s> not available: %d\n", name, rc);
-	return !rc;
+	return rc != -ENOENT;
 }

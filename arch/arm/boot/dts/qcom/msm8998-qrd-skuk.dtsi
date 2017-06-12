@@ -134,14 +134,14 @@
 	};
 
 	/* GPIO 6 for Vol+ Key */
-	gpio@c500 {
+/*	gpio@c500 {
 		status = "okay";
 		qcom,mode = <0>;
 		qcom,pull = <0>;
 		qcom,vin-sel = <0>;
 		qcom,src-sel = <0>;
 		qcom,out-strength = <1>;
-	};
+	};*/
 
 	/* GPIO 21 (NFC_CLK_REQ) */
 	gpio@d400 {
@@ -289,7 +289,7 @@
 	qcom,panel-supply-entries = <&dsi_panel_pwr_supply>;
 };
 
-&vendor {
+/{
 	qrd_batterydata: qcom,battery-data {
 		qcom,batt-id-range-pct = <15>;
 		#include "fg-gen3-batterydata-qrd-skuk-4v4-3000mah.dtsi"

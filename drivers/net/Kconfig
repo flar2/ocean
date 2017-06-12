@@ -425,6 +425,4 @@ config FUJITSU_ES
 
 source "drivers/net/hyperv/Kconfig"
 
-source "drivers/net/rmnet/Kconfig"
-
 endif # NETDEVICES

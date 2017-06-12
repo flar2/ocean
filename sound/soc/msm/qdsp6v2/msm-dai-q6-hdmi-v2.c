@@ -174,7 +174,7 @@ static const struct snd_kcontrol_new hdmi_config_controls[] = {
 	{
 		.access = SNDRV_CTL_ELEM_ACCESS_READ,
 		.iface	= SNDRV_CTL_ELEM_IFACE_PCM,
-		.name	= "HDMI DRIFT",
+		.name	= "HDMI RX Drift",
 		.info	= msm_dai_q6_ext_disp_drift_info,
 		.get	= msm_dai_q6_ext_disp_drift_get,
 	},
@@ -191,7 +191,7 @@ static const struct snd_kcontrol_new display_port_config_controls[] = {
 	{
 		.access = SNDRV_CTL_ELEM_ACCESS_READ,
 		.iface	= SNDRV_CTL_ELEM_IFACE_PCM,
-		.name	= "DISPLAY_PORT DRIFT",
+		.name	= "DISPLAY Port RX Drift",
 		.info	= msm_dai_q6_ext_disp_drift_info,
 		.get	= msm_dai_q6_ext_disp_drift_get,
 	},
@@ -434,10 +434,8 @@ static struct snd_soc_dai_driver msm_dai_q6_hdmi_hdmi_rx_dai = {
 	.playback = {
 		.stream_name = "HDMI Playback",
 		.aif_name = "HDMI",
-		.rates = SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_44100 |
-			 SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_88200 |
-			 SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_176400 |
-			 SNDRV_PCM_RATE_192000,
+		.rates = SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000 |
+		 SNDRV_PCM_RATE_192000,
 		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE,
 		.channels_min = 2,
 		.channels_max = 8,
@@ -455,9 +453,7 @@ static struct snd_soc_dai_driver msm_dai_q6_display_port_rx_dai[] = {
 		.playback = {
 			.stream_name = "Display Port Playback",
 			.aif_name = "DISPLAY_PORT",
-			.rates = SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_44100 |
-				 SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_88200 |
-				 SNDRV_PCM_RATE_96000 | SNDRV_PCM_RATE_176400 |
+			.rates = SNDRV_PCM_RATE_48000 | SNDRV_PCM_RATE_96000 |
 				 SNDRV_PCM_RATE_192000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE |
 				   SNDRV_PCM_FMTBIT_S24_LE,

@@ -62,6 +62,8 @@
 #define CREATE_TRACE_POINTS
 #include "trace/lowmemorykiller.h"
 
+#define HOME_APP_ADJ 411  // oom_adj 7
+
 static uint32_t lowmem_debug_level = 1;
 static short lowmem_adj[6] = {
 	0,
@@ -136,6 +138,9 @@ int adjust_minadj(short *min_score_adj)
 			ret = VMPRESSURE_ADJUST_ENCROACH;
 		else
 			ret = VMPRESSURE_ADJUST_NORMAL;
+
+		lowmem_print(1, "Pressure high, adjust minadj from %d to %d\n",
+			*min_score_adj, adj_max_shift);
 		*min_score_adj = adj_max_shift;
 	}
 	atomic_set(&shift_adj, 0);
@@ -208,22 +213,6 @@ static int test_task_flag(struct task_struct *p, int flag)
 	for_each_thread(p, t) {
 		task_lock(t);
 		if (test_tsk_thread_flag(t, flag)) {
-			task_unlock(t);
-			return 1;
-		}
-		task_unlock(t);
-	}
-
-	return 0;
-}
-
-static int test_task_state(struct task_struct *p, int state)
-{
-	struct task_struct *t;
-
-	for_each_thread(p, t) {
-		task_lock(t);
-		if (t->state & state) {
 			task_unlock(t);
 			return 1;
 		}
@@ -420,15 +409,16 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 	int other_free;
 	int other_file;
 
-	if (!mutex_trylock(&scan_mutex))
+	if (mutex_lock_interruptible(&scan_mutex) < 0)
 		return 0;
 
 	other_free = global_page_state(NR_FREE_PAGES);
 
-	if (global_page_state(NR_SHMEM) + total_swapcache_pages() <
+	if (global_page_state(NR_SHMEM) + global_page_state(NR_MLOCK) + total_swapcache_pages() <
 		global_page_state(NR_FILE_PAGES) + zcache_pages())
 		other_file = global_page_state(NR_FILE_PAGES) + zcache_pages() -
 						global_page_state(NR_SHMEM) -
+						global_page_state(NR_MLOCK) -
 						total_swapcache_pages();
 	else
 		other_file = 0;
@@ -478,6 +468,8 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 		if (time_before_eq(jiffies, lowmem_deathpending_timeout)) {
 			if (test_task_flag(tsk, TIF_MEMDIE)) {
 				rcu_read_unlock();
+				/* give the system time to free up the memory */
+				msleep_interruptible(20);
 				mutex_unlock(&scan_mutex);
 				return 0;
 			}
@@ -510,18 +502,8 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 			     p->comm, p->pid, oom_score_adj, tasksize);
 	}
 	if (selected) {
+		bool should_dump_meminfo = false;
 		long cache_size, cache_limit, free;
-
-		if (test_task_flag(selected, TIF_MEMDIE) &&
-		    (test_task_state(selected, TASK_UNINTERRUPTIBLE))) {
-			lowmem_print(2, "'%s' (%d) is already killed\n",
-				     selected->comm,
-				     selected->pid);
-			rcu_read_unlock();
-			mutex_unlock(&scan_mutex);
-			return 0;
-		}
-
 		task_lock(selected);
 		send_sig(SIGKILL, selected, 0);
 		/*
@@ -536,6 +518,7 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 		cache_limit = minfree * (long)(PAGE_SIZE / 1024);
 		free = other_free * (long)(PAGE_SIZE / 1024);
 		trace_lowmemory_kill(selected, cache_size, cache_limit, free);
+
 		lowmem_print(1, "Killing '%s' (%d), adj %hd,\n" \
 			        "   to free %ldkB on behalf of '%s' (%d) because\n" \
 			        "   cache %ldkB is below limit %ldkB for oom_score_adj %hd\n" \
@@ -563,6 +546,9 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 			     (long)zcache_pages() * (long)(PAGE_SIZE / 1024),
 			     sc->gfp_mask);
 
+		if (selected->signal->oom_score_adj < 411)
+			should_dump_meminfo = true;
+
 		if (lowmem_debug_level >= 2 && selected_oom_score_adj == 0) {
 			show_mem(SHOW_MEM_FILTER_NODES);
 			dump_tasks(NULL, NULL);
@@ -571,6 +557,17 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 		lowmem_deathpending_timeout = jiffies + HZ;
 		rem += selected_tasksize;
 		rcu_read_unlock();
+		if (should_dump_meminfo)
+			lowmem_print(1, "killing process of adj less than 7 \n" \
+					"   NR_FILE_PAGES = %ld \n" \
+					"   NR_SHMEM = %ld \n" \
+					"   NR_MLOCK = %ld \n" \
+					"   total_swapcache_pages = %ld \n",
+					global_page_state(NR_FILE_PAGES),
+					global_page_state(NR_SHMEM),
+					global_page_state(NR_MLOCK),
+					total_swapcache_pages());
+
 		/* give the system time to free up the memory */
 		msleep_interruptible(20);
 		trace_almk_shrink(selected_tasksize, ret,
@@ -590,8 +587,7 @@ static unsigned long lowmem_scan(struct shrinker *s, struct shrink_control *sc)
 static struct shrinker lowmem_shrinker = {
 	.scan_objects = lowmem_scan,
 	.count_objects = lowmem_count,
-	.seeks = DEFAULT_SEEKS * 16,
-	.flags = SHRINKER_LMK
+	.seeks = DEFAULT_SEEKS * 16
 };
 
 static int __init lowmem_init(void)

@@ -50,7 +50,6 @@
 		qcom,vbif-settings = <0x00ac 0x00008040>,
 				     <0x00d0 0x00002828>;
 
-		qcom,mdss-cx-ipeak = <&cx_ipeak_lm 3>;
 		qcom,mdss-has-panic-ctrl;
 		qcom,mdss-per-pipe-panic-luts = <0x000f>,
 						<0xffff>,
@@ -117,14 +116,13 @@
 		clocks = <&clock_mmss MMSS_MNOC_AHB_CLK>,
 			 <&clock_mmss MMSS_MDSS_AHB_CLK>,
 			 <&clock_mmss MMSS_MDSS_AXI_CLK>,
-			 <&clock_mmss MMSS_THROTTLE_MDSS_AXI_CLK>,
 			 <&clock_mmss MDP_CLK_SRC>,
 			 <&clock_mmss MMSS_MDSS_MDP_CLK>,
 			 <&clock_mmss MMSS_MDSS_VSYNC_CLK>,
 			 <&clock_mmss MDP_CLK_SRC>;
 		clock-names = "mnoc_clk", "iface_clk", "bus_clk",
-				"throttle_bus_clk", "core_clk_src",
-				"core_clk", "vsync_clk", "lut_clk";
+				"core_clk_src", "core_clk", "vsync_clk",
+				"lut_clk";
 
 		qcom,mdp-settings = <0x01190 0x00000000>,
 				    <0x012ac 0xc0000ccc>,
@@ -603,19 +601,6 @@
 
 		qcom,mdss-default-ot-rd-limit = <32>;
 		qcom,mdss-default-ot-wr-limit = <32>;
-
-		qcom,sde-reg-bus {
-			/* Reg Bus Scale Settings */
-			qcom,msm-bus,name = "mdss_rot_reg";
-			qcom,msm-bus,num-cases = <4>;
-			qcom,msm-bus,num-paths = <1>;
-			qcom,msm-bus,active-only;
-			qcom,msm-bus,vectors-KBps =
-				<1 590 0 0>,
-				<1 590 0 76800>,
-				<1 590 0 160000>,
-				<1 590 0 320000>;
-		};
 	};
 
 };

@@ -17,7 +17,6 @@
 
 
 #include "msm_drv.h"
-#include "msm_gem.h"
 #include "msm_mmu.h"
 #include "mdp4_kms.h"
 
@@ -178,33 +177,18 @@ static void mdp4_preclose(struct msm_kms *kms, struct drm_file *file)
 	struct mdp4_kms *mdp4_kms = to_mdp4_kms(to_mdp_kms(kms));
 	struct msm_drm_private *priv = mdp4_kms->dev->dev_private;
 	unsigned i;
-	struct msm_gem_address_space *aspace = mdp4_kms->aspace;
 
 	for (i = 0; i < priv->num_crtcs; i++)
 		mdp4_crtc_cancel_pending_flip(priv->crtcs[i], file);
-
-	if (aspace) {
-		aspace->mmu->funcs->detach(aspace->mmu);
-		msm_gem_address_space_destroy(aspace);
-	}
 }
 
 static void mdp4_destroy(struct msm_kms *kms)
 {
-	struct device *dev = mdp4_kms->dev->dev;
-	struct msm_gem_address_space *aspace = mdp4_kms->aspace;
-
 	struct mdp4_kms *mdp4_kms = to_mdp4_kms(to_mdp_kms(kms));
 	if (mdp4_kms->blank_cursor_iova)
-		msm_gem_put_iova(mdp4_kms->blank_cursor_bo, mdp4_kms->aspace);
+		msm_gem_put_iova(mdp4_kms->blank_cursor_bo, mdp4_kms->id);
 	if (mdp4_kms->blank_cursor_bo)
 		drm_gem_object_unreference_unlocked(mdp4_kms->blank_cursor_bo);
-
-	if (aspace) {
-		aspace->mmu->funcs->detach(aspace->mmu);
-		msm_gem_address_space_put(aspace);
-	}
-
 	kfree(mdp4_kms);
 }
 
@@ -414,13 +398,17 @@ fail:
 	return ret;
 }
 
+static const char *iommu_ports[] = {
+		"mdp_port0_cb0", "mdp_port1_cb0",
+};
+
 struct msm_kms *mdp4_kms_init(struct drm_device *dev)
 {
 	struct platform_device *pdev = dev->platformdev;
 	struct mdp4_platform_config *config = mdp4_get_config(pdev);
 	struct mdp4_kms *mdp4_kms;
 	struct msm_kms *kms = NULL;
-	struct msm_gem_address_space *aspace;
+	struct msm_mmu *mmu;
 	int ret;
 
 	mdp4_kms = kzalloc(sizeof(*mdp4_kms), GFP_KERNEL);
@@ -509,25 +497,26 @@ struct msm_kms *mdp4_kms_init(struct drm_device *dev)
 	mdelay(16);
 
 	if (config->iommu) {
-		config->iommu->geometry.aperture_start = 0x1000;
-		config->iommu->geometry.aperture_end = 0xffffffff;
-
-		aspace = msm_gem_address_space_create(&pdev->dev,
-			config->iommu, MSM_IOMMU_DOMAIN_DEFAULT, "mdp4");
-		if (IS_ERR(aspace)) {
-			ret = PTR_ERR(aspace);
+		mmu = msm_iommu_new(&pdev->dev, config->iommu);
+		if (IS_ERR(mmu)) {
+			ret = PTR_ERR(mmu);
 			goto fail;
 		}
-
-		mdp4_kms->aspace = aspace;
-
-		ret = aspace->mmu->funcs->attach(aspace->mmu, NULL, 0);
+		ret = mmu->funcs->attach(mmu, iommu_ports,
+				ARRAY_SIZE(iommu_ports));
 		if (ret)
 			goto fail;
 	} else {
 		dev_info(dev->dev, "no iommu, fallback to phys "
 				"contig buffers for scanout\n");
-		aspace = NULL;
+		mmu = NULL;
+	}
+
+	mdp4_kms->id = msm_register_mmu(dev, mmu);
+	if (mdp4_kms->id < 0) {
+		ret = mdp4_kms->id;
+		dev_err(dev->dev, "failed to register mdp4 iommu: %d\n", ret);
+		goto fail;
 	}
 
 	ret = modeset_init(mdp4_kms);
@@ -546,7 +535,7 @@ struct msm_kms *mdp4_kms_init(struct drm_device *dev)
 		goto fail;
 	}
 
-	ret = msm_gem_get_iova(mdp4_kms->blank_cursor_bo, mdp4_kms->aspace,
+	ret = msm_gem_get_iova(mdp4_kms->blank_cursor_bo, mdp4_kms->id,
 			&mdp4_kms->blank_cursor_iova);
 	if (ret) {
 		dev_err(dev->dev, "could not pin blank-cursor bo: %d\n", ret);
@@ -573,7 +562,6 @@ static struct mdp4_platform_config *mdp4_get_config(struct platform_device *dev)
 	/* TODO */
 	config.max_clk = 266667000;
 	config.iommu = iommu_domain_alloc(msm_iommu_get_bus(&dev->dev));
-
 #else
 	if (cpu_is_apq8064())
 		config.max_clk = 266667000;

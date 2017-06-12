@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -974,9 +974,7 @@ static int mdss_mdp_put_img(struct mdss_mdp_img_data *data, bool rotator,
 		 * be filled due to map call which will be unmapped above.
 		 *
 		 */
-		if (data->ihandle)
-			ion_free(iclient, data->ihandle);
-		pr_debug("free memory handle for secure display/camera content\n");
+		pr_debug("skip memory unmapping for secure display/camera content\n");
 	} else {
 		return -ENOMEM;
 	}
@@ -1055,18 +1053,19 @@ static int mdss_mdp_get_img(struct msmfb_data *img,
 			ret = 0;
 			goto done;
 		} else {
+			struct ion_handle *ihandle = NULL;
 			struct sg_table *sg_ptr = NULL;
 
-			data->ihandle = ion_import_dma_buf(iclient,
-					img->memory_id);
-			if (IS_ERR_OR_NULL(data->ihandle)) {
-				ret = -EINVAL;
-				pr_err("ion import buffer failed\n");
-				data->ihandle = NULL;
-				goto done;
-			}
 			do {
-				sg_ptr = ion_sg_table(iclient, data->ihandle);
+				ihandle = ion_import_dma_buf(iclient,
+							     img->memory_id);
+				if (IS_ERR_OR_NULL(ihandle)) {
+					ret = -EINVAL;
+					pr_err("ion import buffer failed\n");
+					break;
+				}
+
+				sg_ptr = ion_sg_table(iclient, ihandle);
 				if (sg_ptr == NULL) {
 					pr_err("ion sg table get failed\n");
 					ret = -EINVAL;
@@ -1092,10 +1091,12 @@ static int mdss_mdp_get_img(struct msmfb_data *img,
 				ret = 0;
 			} while (0);
 
+			if (!IS_ERR_OR_NULL(ihandle))
+				ion_free(iclient, ihandle);
 			return ret;
 		}
 	}
-	if (start && !*start) {
+	if (!*start) {
 		pr_err("start address is zero!\n");
 		mdss_mdp_put_img(data, rotator, dir);
 		return -ENOMEM;

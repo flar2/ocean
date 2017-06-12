@@ -2224,14 +2224,6 @@ static int hdmi_tx_read_sink_info(struct hdmi_tx_ctrl *hdmi_ctrl)
 		status = hdmi_edid_parser(data);
 		if (status)
 			DEV_ERR("%s: edid parse failed\n", __func__);
-		else
-			/*
-			 * Updata HDMI max supported TMDS clock, consider
-			 * both sink and source capicity.
-			 */
-			hdmi_edid_set_max_pclk_rate(data,
-			  min(hdmi_edid_get_sink_caps_max_tmds_clk(data) / 1000,
-			      hdmi_ctrl->max_pclk_khz));
 	}
 bail:
 	if (hdmi_tx_enable_power(hdmi_ctrl, HDMI_TX_DDC_PM, false))
@@ -3211,7 +3203,8 @@ static int hdmi_tx_power_on(struct hdmi_tx_ctrl *hdmi_ctrl)
 
 	hdmi_tx_core_on(hdmi_ctrl);
 
-	if (!hdmi_tx_is_encryption_set(hdmi_ctrl) &&
+	if (hdmi_ctrl->panel.infoframe &&
+	    !hdmi_tx_is_encryption_set(hdmi_ctrl) &&
 	    hdmi_tx_is_stream_shareable(hdmi_ctrl)) {
 		hdmi_tx_config_avmute(hdmi_ctrl, false);
 	}

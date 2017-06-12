@@ -124,14 +124,14 @@
 
 &pm8998_gpios {
 	/* GPIO 6 for Vol+ Key */
-	gpio@c500 {
+/*	gpio@c500 {
 		status = "okay";
 		qcom,mode = <0>;
 		qcom,pull = <0>;
 		qcom,vin-sel = <0>;
 		qcom,src-sel = <0>;
 		qcom,out-strength = <1>;
-	};
+	};*/
 
 	/* GPIO 21 (NFC_CLK_REQ) */
 	gpio@d400 {
@@ -153,25 +153,6 @@
 		qcom,src-sel = <2>;
 		qcom,out-strength = <1>;
 		qcom,master-en = <1>;
-	};
-};
-
-&i2c_5 {
-	status = "okay";
-	st_fts@49 {
-		compatible = "st,fts";
-		reg = <0x49>;
-		interrupt-parent = <&tlmm>;
-		interrupts = <125 0x2008>;
-		vdd-supply = <&pm8998_l6>;
-		avdd-supply = <&pm8998_l28>;
-		pinctrl-names = "pmx_ts_active", "pmx_ts_suspend";
-		pinctrl-0 = <&ts_active>;
-		pinctrl-1 = <&ts_int_suspend &ts_reset_suspend>;
-		st,irq-gpio = <&tlmm 125 0x2008>;
-		st,reset-gpio = <&tlmm 89 0x00>;
-		st,regulator_dvdd = "vdd";
-		st,regulator_avdd = "avdd";
 	};
 };
 
@@ -219,7 +200,7 @@
 	};
 };
 
-&vendor {
+/{
 	qrd_batterydata: qcom,battery-data {
 		qcom,batt-id-range-pct = <15>;
 		#include "fg-gen3-batterydata-qrd-skuk-4v4-3000mah.dtsi"

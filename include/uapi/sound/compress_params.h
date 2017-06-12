@@ -104,8 +104,7 @@
 #define SND_AUDIOCODEC_APE                   ((__u32) 0x00000020)
 #define SND_AUDIOCODEC_DSD                   ((__u32) 0x00000021)
 #define SND_AUDIOCODEC_APTX                  ((__u32) 0x00000022)
-#define SND_AUDIOCODEC_TRUEHD                ((__u32) 0x00000023)
-#define SND_AUDIOCODEC_MAX                   SND_AUDIOCODEC_TRUEHD
+#define SND_AUDIOCODEC_MAX                   SND_AUDIOCODEC_APTX
 /*
  * Profile and modes are listed with bit masks. This allows for a
  * more compact representation of fields that will not evolve
@@ -514,4 +513,12 @@ struct snd_codec_metadata {
 	__u32 reserved[4];
 };
 
+/* HTC_AUD_START */
+struct dsp_effect_param {
+       uint32_t effect_type; /* 0 for POPP, 1 for COPP */
+       uint32_t module_id;
+       uint32_t param_id;
+       uint32_t payload_size;
+};
+/* HTC_AUD_END */
 #endif

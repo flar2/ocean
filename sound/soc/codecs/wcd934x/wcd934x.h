@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -134,6 +134,13 @@ enum {
 	WCD934X_NUM_IRQS,
 };
 
+/* WCD934X slimbus slave port error status */
+enum {
+	SB_PORT_ERR_OF, /* SB port overflow */
+	SB_PORT_ERR_UF, /* SB port underflow */
+	SB_PORT_ERR_MAX,
+};
+
 /*
  * Selects compander and smart boost settings
  * for a given speaker mode
@@ -192,4 +199,7 @@ extern int tavil_codec_enable_interp_clk(struct snd_soc_codec *codec,
 extern struct tavil_dsd_config *tavil_get_dsd_config(struct snd_soc_codec *);
 extern int tavil_codec_info_create_codec_entry(struct snd_info_entry *,
 					       struct snd_soc_codec *);
+/* HTC_AUD_START - AS HS 2.0 */
+extern int tavil_get_headsetType(struct snd_soc_codec *codec);
+/* HTC_AUD_END */
 #endif

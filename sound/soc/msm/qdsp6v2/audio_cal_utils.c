@@ -158,6 +158,9 @@ size_t get_cal_info_size(int32_t cal_type)
 	case ULP_LSM_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_lsm);
 		break;
+	case DTS_EAGLE_CAL_TYPE:
+		size = 0;
+		break;
 	case AUDIO_CORE_METAINFO_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_metainfo);
 		break;
@@ -303,6 +306,9 @@ size_t get_user_cal_type_size(int32_t cal_type)
 		break;
 	case ULP_LSM_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_lsm);
+		break;
+	case DTS_EAGLE_CAL_TYPE:
+		size = 0;
 		break;
 	case AUDIO_CORE_METAINFO_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_metainfo);
@@ -643,9 +649,7 @@ done:
 	return cal_block;
 err:
 	kfree(cal_block->cal_info);
-	cal_block->cal_info = NULL;
 	kfree(cal_block->client_info);
-	cal_block->client_info = NULL;
 	kfree(cal_block);
 	cal_block = NULL;
 	return cal_block;
@@ -912,7 +916,13 @@ int cal_utils_set_cal(size_t data_size, void *data,
 	}
 
 	if ((data_size > get_user_cal_type_size(
+/* HTC_AUD_START Fix Klockwork */
+#if 0
 		cal_type->info.reg.cal_type)) || (data_size < 0)) {
+#else
+		cal_type->info.reg.cal_type))) {
+#endif
+/* HTC_AUD_END */
 		pr_err("%s: cal_type %d, data_size of %zd is invalid, expecting %zd!\n",
 			__func__, cal_type->info.reg.cal_type, data_size,
 			get_user_cal_type_size(cal_type->info.reg.cal_type));

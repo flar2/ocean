@@ -27,6 +27,8 @@
 #include <linux/cpu_cooling.h>
 #include <linux/bitmap.h>
 #include <linux/msm_thermal.h>
+#include <linux/string.h>
+#include <soc/qcom/htc_util.h>
 
 #include <asm/smp_plat.h>
 #include <asm/cacheflush.h>
@@ -77,6 +79,12 @@ enum lmh_hw_trips {
 	LIMITS_TRIP_MAX,
 };
 
+struct st_htc_lmh_statistic {
+        u32 count;
+};
+
+struct st_htc_lmh_statistic htc_lmh_stat[CONFIG_NR_CPUS][5];
+
 struct msm_lmh_dcvs_hw {
 	char sensor_name[THERMAL_NAME_LENGTH];
 	uint32_t affinity;
@@ -110,6 +118,93 @@ static void msm_lmh_dcvs_get_max_freq(uint32_t cpu, uint32_t *max_freq)
 	dev_pm_opp_find_freq_floor(cpu_dev, &freq_ceil);
 	rcu_read_unlock();
 	*max_freq = freq_ceil/1000;
+}
+
+void htc_lmh_stat_add(int cpu, int cpu_freq){
+	if(cpu <= 7 && cpu >= 0){
+		if(cpu > 3){ //BC
+			if(cpu_freq >= 2035200){
+				htc_lmh_stat[cpu][4].count++;	// Turbo_L2
+				return;
+			}
+			if(cpu_freq < 2035200 && cpu_freq >= 1804800){
+				htc_lmh_stat[cpu][3].count++;	// Turbo
+				return;
+			}
+			if(cpu_freq < 1804800 && cpu_freq >= 1190400){
+				htc_lmh_stat[cpu][2].count++;	// Nominal
+				return;
+			}
+			if(cpu_freq < 1190400 && cpu_freq >= 902400){
+				htc_lmh_stat[cpu][1].count++;	// SVS
+				return;
+			}
+			if(cpu_freq < 902400){
+				htc_lmh_stat[cpu][0].count++;	// LowSVS
+				return;
+			}
+		}else{	//LC
+			if(cpu_freq >= 1824000){
+				htc_lmh_stat[cpu][4].count++;	// Turbo_L2
+				return;
+			}
+			if(cpu_freq < 1824000 && cpu_freq >= 1670400){
+				htc_lmh_stat[cpu][3].count++;	// Turbo
+				return;
+			}
+			if(cpu_freq < 1670400 && cpu_freq >= 1094400){
+				htc_lmh_stat[cpu][2].count++;	// Nominal
+				return;
+			}
+			if(cpu_freq < 1094400 && cpu_freq >= 883200){
+				htc_lmh_stat[cpu][1].count++;	// SVS
+				return;
+			}
+			if(cpu_freq < 883200){
+				htc_lmh_stat[cpu][0].count++;	// LowSVS
+				return;
+			}
+		}
+	}
+}
+
+
+void htc_lmh_stat_show(void)
+{
+	int i = 0, j = 0;
+	char *cpu_clock_plan[] = {"LowSVS", "SVS", "Nominal", "Turbo", "Turbo_L2"};
+        int piece_size = 32;
+        int output_size = piece_size * (CONFIG_NR_CPUS + 1);
+        char output[output_size];
+        char piece[piece_size];
+	for (i = 0; i < CONFIG_NR_CPUS ; i++) {
+		memset(output, 0, sizeof(output));
+		for (j = 4; j >= 0; j--){
+			memset(piece, 0, sizeof(piece));
+			if(i == 0){
+				snprintf(piece, sizeof(piece), "%s(%s,%d)",
+					strlen(output)>0 ? "," : "LC: ",
+					cpu_clock_plan[j],
+					htc_lmh_stat[i][j].count);
+				safe_strcat(output, piece);
+			}else if (i == 4){
+                                snprintf(piece, sizeof(piece), "%s(%s,%d)",
+                                        strlen(output)>0 ? "," : "BC: ",
+                                        cpu_clock_plan[j],
+                                        htc_lmh_stat[i][j].count);
+                                safe_strcat(output, piece);
+			}
+		}
+		if(strlen(output) > 0){
+			printk("[K] htc_lmh_status: %s\n", output);
+		}
+	}
+}
+
+
+void htc_lmh_stat_clear(void)
+{
+        memset(htc_lmh_stat, 0, sizeof(htc_lmh_stat));
 }
 
 static uint32_t msm_lmh_mitigation_notify(struct msm_lmh_dcvs_hw *hw)
@@ -147,6 +242,7 @@ static uint32_t msm_lmh_mitigation_notify(struct msm_lmh_dcvs_hw *hw)
 	max_limit = FREQ_HZ_TO_KHZ(freq_val);
 
 	sched_update_cpu_freq_min_max(&hw->core_map, 0, max_limit);
+	htc_lmh_stat_add(cpumask_first(&hw->core_map), max_limit);
 	trace_lmh_dcvs_freq(cpumask_first(&hw->core_map), max_limit);
 
 notify_exit:

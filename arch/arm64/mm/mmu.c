@@ -444,8 +444,6 @@ static void __init map_mem(pgd_t *pgd)
 
 		if (start >= end)
 			break;
-		if (memblock_is_nomap(reg))
-			continue;
 
 		__map_memblock(pgd, start, end);
 	}

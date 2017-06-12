@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -51,6 +51,8 @@ static inline u32 mdss_mdp_hwio_mask(struct mdss_mdp_hwio_cfg *cfg, u32 val)
 
 #define MDSS_REG_HW_VERSION				0x0
 #define MDSS_REG_HW_INTR_STATUS				0x10
+#define MDSS_REG_HW_INTR2_CLEAR				0x2C
+#define MDSS_REG_HW_INTR2_STATUS			0x0C
 
 #define MDSS_INTR_MDP				BIT(0)
 #define MDSS_INTR_DSI0				BIT(4)
@@ -634,6 +636,15 @@ enum mdss_mdp_dspp_index {
 #define MDSS_MDP_DSPP_OP_PA_SIX_ZONE_SAT_MASK		BIT(30)
 #define MDSS_MDP_DSPP_OP_PA_SIX_ZONE_VAL_MASK		BIT(31)
 
+enum mdss_mpd_intf_index {
+	MDSS_MDP_NO_INTF,
+	MDSS_MDP_INTF0,
+	MDSS_MDP_INTF1,
+	MDSS_MDP_INTF2,
+	MDSS_MDP_INTF3,
+	MDSS_MDP_MAX_INTF
+};
+
 #define MDSS_MDP_REG_INTF_TIMING_ENGINE_EN		0x000
 #define MDSS_MDP_REG_INTF_CONFIG			0x004
 #define MDSS_MDP_REG_INTF_HSYNC_CTL			0x008
@@ -693,8 +704,6 @@ enum mdss_mdp_dspp_index {
 #define MDSS_MDP_REG_INTF_LINE_COUNT			0x0B0
 #define MDSS_MDP_PANEL_FORMAT_RGB888			0x213F
 #define MDSS_MDP_PANEL_FORMAT_RGB666			0x212A
-
-#define MDSS_MDP_REG_DSI_ULP_CLAMP_VALUE		0x064
 
 #define MDSS_MDP_PANEL_FORMAT_PACK_ALIGN_MSB		BIT(7)
 
@@ -829,8 +838,6 @@ enum mdss_mdp_pingpong_index {
 #define MMSS_VBIF_WR_LIM_CONF			0x0C0
 #define MDSS_VBIF_WRITE_GATHER_EN		0x0AC
 
-#define MMSS_VBIF_SRC_ERR		0x194
-#define MMSS_VBIF_ERR_INFO		0x1A0
 #define MMSS_VBIF_XIN_HALT_CTRL0	0x200
 #define MMSS_VBIF_XIN_HALT_CTRL1	0x204
 #define MMSS_VBIF_AXI_HALT_CTRL0	0x208
@@ -851,9 +858,5 @@ enum mdss_mdp_pingpong_index {
 #define MDSS_MDP_REG_TRAFFIC_SHAPER_RD_CLIENT(num)	(0x030 + (num * 4))
 #define MDSS_MDP_REG_TRAFFIC_SHAPER_WR_CLIENT(num)	(0x060 + (num * 4))
 #define MDSS_MDP_REG_TRAFFIC_SHAPER_FIXPOINT_FACTOR	4
-
-#define MDSS_MDP_REG_SPLIT_LINK				0x00060
-#define MDSS_MDP_REG_SPLIT_LINK_LEFT_LINK_EN		BIT(1)
-#define MDSS_MDP_REG_SPLIT_LINK_RIGHT_LINK_EN		BIT(2)
 
 #endif

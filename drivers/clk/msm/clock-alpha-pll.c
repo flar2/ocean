@@ -612,17 +612,13 @@ static int alpha_pll_set_rate(struct clk *c, unsigned long rate)
 		return -EINVAL;
 	}
 
-	if (pll->no_irq_dis)
-		spin_lock(&c->lock);
-	else
-		spin_lock_irqsave(&c->lock, flags);
-
 	/*
 	 * For PLLs that do not support dynamic programming (dynamic_update
 	 * is not set), ensure PLL is off before changing rate. For
 	 * optimization reasons, assume no downstream clock is actively
 	 * using it.
 	 */
+	spin_lock_irqsave(&c->lock, flags);
 	if (c->count && !pll->dynamic_update)
 		c->ops->disable(c);
 
@@ -648,10 +644,7 @@ static int alpha_pll_set_rate(struct clk *c, unsigned long rate)
 	if (c->count && !pll->dynamic_update)
 		c->ops->enable(c);
 
-	if (pll->no_irq_dis)
-		spin_unlock(&c->lock);
-	else
-		spin_unlock_irqrestore(&c->lock, flags);
+	spin_unlock_irqrestore(&c->lock, flags);
 	return 0;
 }
 

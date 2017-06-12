@@ -113,8 +113,6 @@ struct msm_ext_disp_intf_ops {
  * @get_audio_edid_blk: retrieve audio edid block
  * @cable_status: cable connected/disconnected
  * @get_intf_id: id of connected interface
- * @acknowledge: acknowledge audio status
- * @codec_ready: notify when codec is ready
  */
 struct msm_ext_disp_audio_codec_ops {
 	int (*audio_info_setup)(struct platform_device *pdev,
@@ -124,8 +122,6 @@ struct msm_ext_disp_audio_codec_ops {
 	int (*cable_status)(struct platform_device *pdev, u32 vote);
 	int (*get_intf_id)(struct platform_device *pdev);
 	void (*teardown_done)(struct platform_device *pdev);
-	int (*acknowledge)(struct platform_device *pdev, u32 ack);
-	void (*codec_ready)(struct platform_device *pdev);
 };
 
 /*

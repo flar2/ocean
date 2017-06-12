@@ -153,7 +153,7 @@ struct sdhci_msm_pltfm_data {
 	u32 ice_clk_min;
 	struct sdhci_msm_pm_qos_data pm_qos_data;
 	bool core_3_0v_support;
-	bool sdr104_wa;
+	int slot_type;
 };
 
 struct sdhci_msm_bus_vote {
@@ -172,12 +172,6 @@ struct sdhci_msm_ice_data {
 	int state;
 };
 
-struct sdhci_msm_debug_data {
-	struct mmc_host copy_mmc;
-	struct mmc_card copy_card;
-	struct sdhci_host copy_host;
-};
-
 struct sdhci_msm_host {
 	struct platform_device	*pdev;
 	void __iomem *core_mem;    /* MSM SDCC mapped address */
@@ -193,7 +187,6 @@ struct sdhci_msm_host {
 	atomic_t clks_on; /* Set if clocks are enabled */
 	struct sdhci_msm_pltfm_data *pdata;
 	struct mmc_host  *mmc;
-	struct sdhci_msm_debug_data cached_data;
 	struct sdhci_pltfm_data sdhci_msm_pdata;
 	u32 curr_pwr_state;
 	u32 curr_io_level;
@@ -226,6 +219,7 @@ struct sdhci_msm_host {
 	bool tuning_in_progress;
 	bool mci_removed;
 	const struct sdhci_msm_offset *offset;
+	struct proc_dir_entry	*speed_class;
 };
 
 extern char *saved_command_line;

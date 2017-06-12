@@ -1,7 +1,10 @@
 #
 # Makefile for nfc devices
 #
-
+ifneq ($(findstring OceanUHLJAPAN,$(PRIVATE_SKU_NAME)),OceanUHLJAPAN)
+obj-$(CONFIG_SENSORS_NFC_PN553) += nq-nci-htc.o
+obj-$(CONFIG_SENSORS_NFC_PN553) += nq-nci-htc-mfg.o
+endif
 obj-$(CONFIG_NFC_FDP)		+= fdp/
 obj-$(CONFIG_NFC_PN544)		+= pn544/
 obj-$(CONFIG_NFC_MICROREAD)	+= microread/

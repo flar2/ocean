@@ -929,7 +929,7 @@ int ipa3_get_ep_mapping(enum ipa_client_type client)
 
 	if (client >= IPA_CLIENT_MAX || client < 0) {
 		IPAERR("Bad client number! client =%d\n", client);
-		return IPA_EP_NOT_ALLOCATED;
+		return -EINVAL;
 	}
 
 	ipa_ep_idx = ipa3_ep_mapping[ipa3_get_hw_type_index()][client].pipe_num;
@@ -1002,7 +1002,7 @@ u8 ipa3_get_qmb_master_sel(enum ipa_client_type client)
 
 void ipa3_set_client(int index, enum ipacm_client_enum client, bool uplink)
 {
-	if (client > IPACM_CLIENT_MAX || client < IPACM_CLIENT_USB) {
+	if (client >= IPACM_CLIENT_MAX || client < IPACM_CLIENT_USB) {
 		IPAERR("Bad client number! client =%d\n", client);
 	} else if (index >= IPA3_MAX_NUM_PIPES || index < 0) {
 		IPAERR("Bad pipe index! index =%d\n", index);
@@ -3430,7 +3430,6 @@ static void ipa3_gsi_poll_after_suspend(struct ipa3_ep_context *ep)
 		/* queue a work to start polling if don't have one */
 		atomic_set(&ipa3_ctx->transport_pm.eot_activity, 1);
 		if (!atomic_read(&ep->sys->curr_polling_state)) {
-			ipa3_inc_acquire_wakelock();
 			atomic_set(&ep->sys->curr_polling_state, 1);
 			queue_work(ep->sys->wq, &ep->sys->work);
 		}
@@ -3447,11 +3446,6 @@ void ipa3_suspend_apps_pipes(bool suspend)
 	cfg.ipa_ep_suspend = suspend;
 
 	ipa_ep_idx = ipa3_get_ep_mapping(IPA_CLIENT_APPS_LAN_CONS);
-	if (ipa_ep_idx < 0) {
-		IPAERR("IPA client mapping failed\n");
-		ipa_assert();
-		return;
-	}
 	ep = &ipa3_ctx->ep[ipa_ep_idx];
 	if (ep->valid) {
 		IPADBG("%s pipe %d\n", suspend ? "suspend" : "unsuspend",
@@ -3483,51 +3477,6 @@ void ipa3_suspend_apps_pipes(bool suspend)
 	}
 }
 
-int ipa3_allocate_dma_task_for_gsi(void)
-{
-	struct ipahal_imm_cmd_dma_task_32b_addr cmd = { 0 };
-
-	IPADBG("Allocate mem\n");
-	ipa3_ctx->dma_task_info.mem.size = IPA_GSI_CHANNEL_STOP_PKT_SIZE;
-	ipa3_ctx->dma_task_info.mem.base = dma_alloc_coherent(ipa3_ctx->pdev,
-		ipa3_ctx->dma_task_info.mem.size,
-		&ipa3_ctx->dma_task_info.mem.phys_base,
-		GFP_KERNEL);
-	if (!ipa3_ctx->dma_task_info.mem.base) {
-		IPAERR("no mem\n");
-		return -EFAULT;
-	}
-
-	cmd.flsh = 1;
-	cmd.size1 = ipa3_ctx->dma_task_info.mem.size;
-	cmd.addr1 = ipa3_ctx->dma_task_info.mem.phys_base;
-	cmd.packet_size = ipa3_ctx->dma_task_info.mem.size;
-	ipa3_ctx->dma_task_info.cmd_pyld = ipahal_construct_imm_cmd(
-			IPA_IMM_CMD_DMA_TASK_32B_ADDR, &cmd, false);
-	if (!ipa3_ctx->dma_task_info.cmd_pyld) {
-		IPAERR("failed to construct dma_task_32b_addr cmd\n");
-		dma_free_coherent(ipa3_ctx->pdev,
-			ipa3_ctx->dma_task_info.mem.size,
-			ipa3_ctx->dma_task_info.mem.base,
-			ipa3_ctx->dma_task_info.mem.phys_base);
-		memset(&ipa3_ctx->dma_task_info, 0,
-			sizeof(ipa3_ctx->dma_task_info));
-		return -EFAULT;
-	}
-
-	return 0;
-}
-
-void ipa3_free_dma_task_for_gsi(void)
-{
-	dma_free_coherent(ipa3_ctx->pdev,
-		ipa3_ctx->dma_task_info.mem.size,
-		ipa3_ctx->dma_task_info.mem.base,
-		ipa3_ctx->dma_task_info.mem.phys_base);
-	ipahal_destroy_imm_cmd(ipa3_ctx->dma_task_info.cmd_pyld);
-	memset(&ipa3_ctx->dma_task_info, 0, sizeof(ipa3_ctx->dma_task_info));
-}
-
 /**
  * ipa3_inject_dma_task_for_gsi()- Send DMA_TASK to IPA for GSI stop channel
  *
@@ -3536,12 +3485,41 @@ void ipa3_free_dma_task_for_gsi(void)
  */
 int ipa3_inject_dma_task_for_gsi(void)
 {
+	static struct ipa_mem_buffer mem = {0};
+	struct ipahal_imm_cmd_dma_task_32b_addr cmd = {0};
+	static struct ipahal_imm_cmd_pyld *cmd_pyld;
 	struct ipa3_desc desc = {0};
+
+	/* allocate the memory only for the very first time */
+	if (!mem.base) {
+		IPADBG("Allocate mem\n");
+		mem.size = IPA_GSI_CHANNEL_STOP_PKT_SIZE;
+		mem.base = dma_alloc_coherent(ipa3_ctx->pdev,
+			mem.size,
+			&mem.phys_base,
+			GFP_KERNEL);
+		if (!mem.base) {
+			IPAERR("no mem\n");
+			return -EFAULT;
+		}
+	}
+	if (!cmd_pyld) {
+		cmd.flsh = 1;
+		cmd.size1 = mem.size;
+		cmd.addr1 = mem.phys_base;
+		cmd.packet_size = mem.size;
+		cmd_pyld = ipahal_construct_imm_cmd(
+			IPA_IMM_CMD_DMA_TASK_32B_ADDR, &cmd, false);
+		if (!cmd_pyld) {
+			IPAERR("failed to construct dma_task_32b_addr cmd\n");
+			return -EFAULT;
+		}
+	}
 
 	desc.opcode = ipahal_imm_cmd_get_opcode_param(
 		IPA_IMM_CMD_DMA_TASK_32B_ADDR, 1);
-	desc.pyld = ipa3_ctx->dma_task_info.cmd_pyld->data;
-	desc.len = ipa3_ctx->dma_task_info.cmd_pyld->len;
+	desc.pyld = cmd_pyld->data;
+	desc.len = cmd_pyld->len;
 	desc.type = IPA_IMM_CMD_DESC;
 
 	IPADBG("sending 1B packet to IPA\n");
@@ -3583,24 +3561,18 @@ int ipa3_stop_gsi_channel(u32 clnt_hdl)
 	memset(&mem, 0, sizeof(mem));
 
 	if (IPA_CLIENT_IS_PROD(ep->client)) {
-		IPADBG("Calling gsi_stop_channel ch:%lu\n",
-			ep->gsi_chan_hdl);
 		res = gsi_stop_channel(ep->gsi_chan_hdl);
-		IPADBG("gsi_stop_channel ch: %lu returned %d\n",
-			ep->gsi_chan_hdl, res);
 		goto end_sequence;
 	}
 
 	for (i = 0; i < IPA_GSI_CHANNEL_STOP_MAX_RETRY; i++) {
-		IPADBG("Calling gsi_stop_channel ch:%lu\n",
-			ep->gsi_chan_hdl);
+		IPADBG("Calling gsi_stop_channel\n");
 		res = gsi_stop_channel(ep->gsi_chan_hdl);
-		IPADBG("gsi_stop_channel ch: %lu returned %d\n",
-			ep->gsi_chan_hdl, res);
+		IPADBG("gsi_stop_channel returned %d\n", res);
 		if (res != -GSI_STATUS_AGAIN && res != -GSI_STATUS_TIMED_OUT)
 			goto end_sequence;
 
-		IPADBG("Inject a DMA_TASK with 1B packet to IPA\n");
+		IPADBG("Inject a DMA_TASK with 1B packet to IPA and retry\n");
 		/* Send a 1B packet DMA_TASK to IPA and try again */
 		res = ipa3_inject_dma_task_for_gsi();
 		if (res) {

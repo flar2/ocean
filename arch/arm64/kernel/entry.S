@@ -29,9 +29,7 @@
 #include <asm/esr.h>
 #include <asm/irq.h>
 #include <asm/memory.h>
-#include <asm/ptrace.h>
 #include <asm/thread_info.h>
-#include <asm/uaccess.h>
 #include <asm/unistd.h>
 
 /*
@@ -111,32 +109,6 @@
 	mrs	x22, elr_el1
 	mrs	x23, spsr_el1
 	stp	lr, x21, [sp, #S_LR]
-
-#ifdef CONFIG_ARM64_SW_TTBR0_PAN
-	/*
-	 * Set the TTBR0 PAN bit in SPSR. When the exception is taken from
-	 * EL0, there is no need to check the state of TTBR0_EL1 since
-	 * accesses are always enabled.
-	 * Note that the meaning of this bit differs from the ARMv8.1 PAN
-	 * feature as all TTBR0_EL1 accesses are disabled, not just those to
-	 * user mappings.
-	 */
-alternative_if ARM64_HAS_PAN
-	b	1f				// skip TTBR0 PAN
-alternative_else_nop_endif
-
-	.if	\el != 0
-	mrs	x21, ttbr0_el1
-	tst	x21, #0xffff << 48		// Check for the reserved ASID
-	orr	x23, x23, #PSR_PAN_BIT		// Set the emulated PAN in the saved SPSR
-	b.eq	1f				// TTBR0 access already disabled
-	and	x23, x23, #~PSR_PAN_BIT		// Clear the emulated PAN in the saved SPSR
-	.endif
-
-	__uaccess_ttbr0_disable x21
-1:
-#endif
-
 	stp	x22, x23, [sp, #S_PC]
 
 	/*
@@ -175,40 +147,6 @@ alternative_else_nop_endif
 	ldp	x21, x22, [sp, #S_PC]		// load ELR, SPSR
 	.if	\el == 0
 	ct_user_enter
-	.endif
-
-#ifdef CONFIG_ARM64_SW_TTBR0_PAN
-	/*
-	 * Restore access to TTBR0_EL1. If returning to EL0, no need for SPSR
-	 * PAN bit checking.
-	 */
-alternative_if ARM64_HAS_PAN
-	b	2f				// skip TTBR0 PAN
-alternative_else_nop_endif
-
-	.if	\el != 0
-	tbnz	x22, #22, 1f			// Skip re-enabling TTBR0 access if the PSR_PAN_BIT is set
-	.endif
-
-	__uaccess_ttbr0_enable x0
-
-	.if	\el == 0
-	/*
-	 * Enable errata workarounds only if returning to user. The only
-	 * workaround currently required for TTBR0_EL1 changes are for the
-	 * Cavium erratum 27456 (broadcast TLBI instructions may cause I-cache
-	 * corruption).
-	 */
-	post_ttbr0_update_workaround
-	.endif
-1:
-	.if	\el != 0
-	and	x22, x22, #~PSR_PAN_BIT		// ARMv8.0 CPUs do not understand this bit
-	.endif
-2:
-#endif
-
-	.if	\el == 0
 	ldr	x23, [sp, #S_SP]		// load return stack pointer
 	msr	sp_el0, x23
 #ifdef CONFIG_ARM64_ERRATUM_845719
@@ -230,7 +168,6 @@ alternative_else
 alternative_endif
 #endif
 	.endif
-
 	msr	elr_el1, x21			// set up the return data
 	msr	spsr_el1, x22
 	ldp	x0, x1, [sp, #16 * 0]
@@ -251,6 +188,10 @@ alternative_endif
 	ldr	lr, [sp, #S_LR]
 	add	sp, sp, #S_FRAME_SIZE		// restore sp
 	eret					// return to kernel
+	.endm
+
+	.macro	get_thread_info, rd
+	mrs	\rd, sp_el0
 	.endm
 
 	.macro	irq_stack_entry
@@ -317,7 +258,6 @@ tsk	.req	x28		// current thread_info
 /*
  * Exception vectors.
  */
-	.pushsection ".entry.text", "ax"
 
 	.align	11
 ENTRY(vectors)
@@ -353,7 +293,7 @@ END(vectors)
  * Invalid mode handlers
  */
 	.macro	inv_entry, el, reason, regsize = 64
-	kernel_entry \el, \regsize
+	kernel_entry el, \regsize
 	mov	x0, sp
 	mov	x1, #\reason
 	mrs	x2, esr_el1
@@ -407,7 +347,7 @@ ENDPROC(el1_error_invalid)
  */
 	.align	6
 el1_sync:
-#ifdef CONFIG_QCOM_TLB_EL2_HANDLER
+#ifdef CONFIG_TLB_EL2_HANDLER
 	smc #0xffff
 #endif
 	kernel_entry 1
@@ -415,8 +355,6 @@ el1_sync:
 	lsr	x24, x1, #ESR_ELx_EC_SHIFT	// exception class
 	cmp	x24, #ESR_ELx_EC_DABT_CUR	// data abort in EL1
 	b.eq	el1_da
-	cmp	x24, #ESR_ELx_EC_IABT_CUR	// instruction abort in EL1
-	b.eq	el1_ia
 	cmp	x24, #ESR_ELx_EC_SYS64		// configurable trap
 	b.eq	el1_undef
 	cmp	x24, #ESR_ELx_EC_SP_ALIGN	// stack alignment exception
@@ -428,11 +366,6 @@ el1_sync:
 	cmp	x24, #ESR_ELx_EC_BREAKPT_CUR	// debug exception in EL1
 	b.ge	el1_dbg
 	b	el1_inv
-
-el1_ia:
-	/*
-	 * Fall through to the Data abort case
-	 */
 el1_da:
 	/*
 	 * Data abort handling
@@ -561,7 +494,7 @@ el0_sync_compat:
 	cmp	x24, #ESR_ELx_EC_IABT_LOW	// instruction abort in EL0
 	b.eq	el0_ia
 	cmp	x24, #ESR_ELx_EC_FP_ASIMD	// FP/ASIMD access
-	b.eq	el0_fpsimd_acc_compat
+	b.eq	el0_fpsimd_acc
 	cmp	x24, #ESR_ELx_EC_FP_EXC32	// FP/ASIMD exception
 	b.eq	el0_fpsimd_exc
 	cmp	x24, #ESR_ELx_EC_PC_ALIGN	// pc alignment exception
@@ -618,7 +551,7 @@ el0_ia:
 	enable_dbg_and_irq
 	ct_user_exit
 	mov	x0, x26
-	mov	x1, x25
+	orr	x1, x25, #1 << 24		// use reserved ISS bit for instruction aborts
 	mov	x2, sp
 	bl	do_mem_abort
 	b	ret_to_user
@@ -632,17 +565,6 @@ el0_fpsimd_acc:
 	mov	x1, sp
 	bl	do_fpsimd_acc
 	b	ret_to_user
-el0_fpsimd_acc_compat:
-	/*
-	 * Floating Point or Advanced SIMD access
-	 */
-	enable_dbg
-	ct_user_exit
-	mov	x0, x25
-	mov	x1, sp
-	bl	do_fpsimd_acc_compat
-	b	ret_to_user
-
 el0_fpsimd_exc:
 	/*
 	 * Floating Point or Advanced SIMD exception
@@ -694,7 +616,7 @@ el0_inv:
 	mov	x0, sp
 	mov	x1, #BAD_SYNC
 	mov	x2, x25
-	bl	bad_el0_sync
+	bl	bad_mode
 	b	ret_to_user
 ENDPROC(el0_sync)
 
@@ -897,8 +819,6 @@ __ni_sys_trace:
 	mov	x0, sp
 	bl	do_ni_syscall
 	b	__sys_trace_return
-
-	.popsection				// .entry.text
 
 /*
  * Special system call wrappers.

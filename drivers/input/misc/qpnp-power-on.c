@@ -32,6 +32,9 @@
 #include <linux/regulator/of_regulator.h>
 #include <linux/input/qpnp-power-on.h>
 #include <linux/power_supply.h>
+#include <../../power/reset/htc_restart_handler.h>
+
+#include <linux/htc_flags.h>
 
 #define PMIC_VER_8941           0x01
 #define PMIC_VERSION_REG        0x0105
@@ -207,7 +210,7 @@ struct qpnp_pon {
 	int			pon_power_off_reason;
 	int			num_pon_reg;
 	int			num_pon_config;
-	u32			dbc_time_us;
+	u32			dbc;
 	u32			uvlo;
 	int			warm_reset_poff_type;
 	int			hard_reset_poff_type;
@@ -219,8 +222,6 @@ struct qpnp_pon {
 	u8			warm_reset_reason2;
 	bool			is_spon;
 	bool			store_hard_reset_reason;
-	bool			kpdpwr_dbc_enable;
-	ktime_t			kpdpwr_last_release_time;
 };
 
 static int pon_ship_mode_en;
@@ -383,7 +384,7 @@ static int qpnp_pon_set_dbc(struct qpnp_pon *pon, u32 delay)
 	int rc = 0;
 	u32 val;
 
-	if (delay == pon->dbc_time_us)
+	if (delay == pon->dbc)
 		goto out;
 
 	if (pon->pon_input)
@@ -411,7 +412,7 @@ static int qpnp_pon_set_dbc(struct qpnp_pon *pon, u32 delay)
 		goto unlock;
 	}
 
-	pon->dbc_time_us = delay;
+	pon->dbc = delay;
 
 unlock:
 	if (pon->pon_input)
@@ -420,34 +421,12 @@ out:
 	return rc;
 }
 
-static int qpnp_pon_get_dbc(struct qpnp_pon *pon, u32 *delay)
-{
-	int rc;
-	unsigned int val;
-
-	rc = regmap_read(pon->regmap, QPNP_PON_DBC_CTL(pon), &val);
-	if (rc) {
-		pr_err("Unable to read pon_dbc_ctl rc=%d\n", rc);
-		return rc;
-	}
-	val &= QPNP_PON_DBC_DELAY_MASK(pon);
-
-	if (is_pon_gen2(pon))
-		*delay = USEC_PER_SEC /
-			(1 << (QPNP_PON_GEN2_DELAY_BIT_SHIFT - val));
-	else
-		*delay = USEC_PER_SEC /
-			(1 << (QPNP_PON_DELAY_BIT_SHIFT - val));
-
-	return rc;
-}
-
 static ssize_t qpnp_pon_dbc_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	struct qpnp_pon *pon = dev_get_drvdata(dev);
 
-	return snprintf(buf, QPNP_PON_BUFFER_SIZE, "%d\n", pon->dbc_time_us);
+	return snprintf(buf, QPNP_PON_BUFFER_SIZE, "%d\n", pon->dbc);
 }
 
 static ssize_t qpnp_pon_dbc_store(struct device *dev,
@@ -801,7 +780,6 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 	u8  pon_rt_bit = 0;
 	u32 key_status;
 	uint pon_rt_sts;
-	u64 elapsed_us;
 
 	cfg = qpnp_get_cfg(pon, pon_type);
 	if (!cfg)
@@ -810,15 +788,6 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 	/* Check if key reporting is supported */
 	if (!cfg->key_code)
 		return 0;
-
-	if (pon->kpdpwr_dbc_enable && cfg->pon_type == PON_KPDPWR) {
-		elapsed_us = ktime_us_delta(ktime_get(),
-				pon->kpdpwr_last_release_time);
-		if (elapsed_us < pon->dbc_time_us) {
-			pr_debug("Ignoring kpdpwr event - within debounce time\n");
-			return 0;
-		}
-	}
 
 	/* check the RT status to get the current status of the line */
 	rc = regmap_read(pon->regmap, QPNP_PON_RT_STS(pon), &pon_rt_sts);
@@ -848,11 +817,7 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 					cfg->key_code, pon_rt_sts);
 	key_status = pon_rt_sts & pon_rt_bit;
 
-	if (pon->kpdpwr_dbc_enable && cfg->pon_type == PON_KPDPWR) {
-		if (!key_status)
-			pon->kpdpwr_last_release_time = ktime_get();
-	}
-
+#ifdef CONFIG_QPNP_KEY_INPUT
 	/*
 	 * simulate press event in case release event occurred
 	 * without a press event
@@ -864,6 +829,7 @@ qpnp_pon_input_dispatch(struct qpnp_pon *pon, u32 pon_type)
 
 	input_report_key(pon->pon_input, cfg->key_code, key_status);
 	input_sync(pon->pon_input);
+#endif
 
 	cfg->old_state = !!key_status;
 
@@ -900,6 +866,8 @@ static irqreturn_t qpnp_resin_irq(int irq, void *_pon)
 
 static irqreturn_t qpnp_kpdpwr_resin_bark_irq(int irq, void *_pon)
 {
+	pr_info("Long press power key: kpdpwer+resin bark\r\n");
+	set_restart_action(RESTART_REASON_RAMDUMP, "PowerKey Hard Reset");
 	return IRQ_HANDLED;
 }
 
@@ -999,9 +967,11 @@ static void bark_work_func(struct work_struct *work)
 	}
 
 	if (!(pon_rt_sts & QPNP_PON_RESIN_BARK_N_SET)) {
+#ifdef CONFIG_QPNP_KEY_INPUT
 		/* report the key event and enable the bark IRQ */
 		input_report_key(pon->pon_input, cfg->key_code, 0);
 		input_sync(pon->pon_input);
+#endif
 		enable_irq(cfg->bark_irq);
 	} else {
 		/* disable reset */
@@ -1043,9 +1013,11 @@ static irqreturn_t qpnp_resin_bark_irq(int irq, void *_pon)
 		goto err_exit;
 	}
 
+#ifdef CONFIG_QPNP_KEY_INPUT
 	/* report the key event */
 	input_report_key(pon->pon_input, cfg->key_code, 1);
 	input_sync(pon->pon_input);
+#endif
 	/* schedule work to check the bark status for key-release */
 	schedule_delayed_work(&pon->bark_work, QPNP_KEY_STATUS_DELAY);
 err_exit:
@@ -1523,6 +1495,9 @@ static int qpnp_pon_config_init(struct qpnp_pon *pon)
 			}
 			rc = of_property_read_u32(pp, "qcom,s2-type",
 							&cfg->s2_type);
+			if (get_radio_flag() & BIT(3))
+				cfg->s2_type = 1; /* 0x1: WARM_RESET */
+
 			if (rc) {
 				dev_err(&pon->pdev->dev,
 					"Unable to read s2-type\n");
@@ -1803,6 +1778,193 @@ static struct kernel_param_ops smpl_en_ops = {
 
 module_param_cb(smpl_en, &smpl_en_ops, &smpl_en, 0644);
 
+
+int qpnp_get_s2_en(int pon_type)
+{
+	u16 rst_en_reg;
+	struct qpnp_pon *pon = sys_reset_dev;
+	int rc;
+	uint val = 0;
+
+	if (pon == NULL)
+		return -ENOMEM;
+
+	switch (pon_type) {
+	case PON_KPDPWR:
+		rst_en_reg = QPNP_PON_KPDPWR_S2_CNTL2(pon);
+		break;
+	case PON_RESIN:
+		rst_en_reg = QPNP_PON_RESIN_S2_CNTL2(pon);
+		break;
+	case PON_KPDPWR_RESIN:
+		rst_en_reg = QPNP_PON_KPDPWR_RESIN_S2_CNTL2(pon);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	rc = regmap_read(pon->regmap, rst_en_reg, &val);
+	if (rc) {
+		dev_err(&pon->pdev->dev,
+			"%s: Unable to read addr = %x, rc(%d)\n", __func__, rst_en_reg, rc);
+		return -EINVAL;
+	}
+
+	if (val & QPNP_PON_S2_RESET_ENABLE)
+		return 1;
+	else
+		return 0;
+}
+EXPORT_SYMBOL(qpnp_get_s2_en);
+
+int qpnp_config_s2_enable(int pon_type, int en)
+{
+	u16 rst_en_reg;
+	struct qpnp_pon *pon = sys_reset_dev;
+	int rc;
+
+	if (pon == NULL)
+		return -ENOMEM;
+
+	switch (pon_type) {
+	case PON_KPDPWR:
+		rst_en_reg = QPNP_PON_KPDPWR_S2_CNTL2(pon);
+		break;
+	case PON_RESIN:
+		rst_en_reg = QPNP_PON_RESIN_S2_CNTL2(pon);
+		break;
+	case PON_KPDPWR_RESIN:
+		rst_en_reg = QPNP_PON_KPDPWR_RESIN_S2_CNTL2(pon);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (en)
+		rc = qpnp_pon_masked_write(pon, rst_en_reg, QPNP_PON_RESET_EN,
+							QPNP_PON_S2_RESET_ENABLE);
+	else
+		rc = qpnp_pon_masked_write(pon, rst_en_reg, QPNP_PON_RESET_EN, 0);
+
+	if (rc) {
+		dev_err(&pon->pdev->dev,
+			"%s: Unable to write to addr = %x, rc(%d)\n", __func__, rst_en_reg, rc);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL(qpnp_config_s2_enable);
+
+void qpnp_kick_s2_timer(void)
+{
+	if (qpnp_get_s2_en(PON_KPDPWR_RESIN) > 0) {
+		qpnp_config_s2_enable(PON_KPDPWR_RESIN, 0);
+		/*
+		  For reliable hardware operation, the minimum time allowed between
+		  write operations is 3 sleep clock cycles.
+		  30.5us * 3 = 91.6us < 100us
+		*/
+		udelay(100);
+		qpnp_config_s2_enable(PON_KPDPWR_RESIN, 1);
+		udelay(100);
+	}
+}
+/* Note: Please don't use this funciton at IRQ handler due to it has the udelay */
+EXPORT_SYMBOL(qpnp_kick_s2_timer);
+
+
+static int do_kick_s2_timer(const char *val, const struct kernel_param *kp)
+{
+	qpnp_kick_s2_timer();
+	return 0;
+}
+
+static int get_kick_s2_timer(char *buf, const struct kernel_param *kp)
+{
+	return snprintf(buf, PAGE_SIZE, "%d", 0);
+}
+
+int qpnp_pon_set_s3_timer(u32 s3_debounce)
+{
+	int rc = 0;
+	struct qpnp_pon *pon = sys_reset_dev;
+
+	/* s3 debounce is SEC_ACCESS register */
+	rc = qpnp_pon_masked_write(pon, QPNP_PON_SEC_ACCESS(pon),
+			0xFF, QPNP_PON_SEC_UNLOCK);
+	if (rc) {
+		dev_err(&pon->pdev->dev, "PM:Unable to do SEC_ACCESS rc:%d\n",
+				rc);
+		return rc;
+	}
+
+	/* set PM s3 debounce time */
+	rc = qpnp_pon_masked_write(pon, QPNP_PON_S3_DBC_CTL(pon),
+			QPNP_PON_S3_DBC_DELAY_MASK, s3_debounce);
+	if (rc) {
+		dev_err(&pon->pdev->dev, "PM:Unable to set S3 debounce rc:%d\n",
+				rc);
+		return rc;
+	}
+
+	/* Requires 5 sleep clock cycles of delay at least */
+	udelay(200);
+
+	return rc;
+}
+
+static bool to_extend_s3_timer;
+static bool to_extend_s3_timer_z = false;
+static int do_extend_s3_timer(const char *val, const struct kernel_param *kp)
+{
+	int rc;
+	int s3_debounce;
+
+	rc = param_set_bool(val, kp);
+	if (rc) {
+		pr_err("do_extend_s3_timer: wrong param, %d\n", rc);
+		return rc;
+	}
+
+	/* do nothing, if the value is the same as the previous one */
+	if((*(bool *)kp->arg) == to_extend_s3_timer_z)
+		return 0;
+
+	if (*(bool *)kp->arg)
+		s3_debounce = ilog2(128); /* Set stage 3 timer as 128 sec */
+	else
+		s3_debounce = ilog2(32); /* Set stage 3 timer as 32 sec */
+
+
+	/* Set PM/PMi S3 reset time */
+	rc = qpnp_pon_set_s3_timer(s3_debounce);
+	if (rc) {
+		pr_err("do_extend_s3_timer failed, %d\n", rc);
+		return rc;
+	}
+
+	/* Update the previous state */
+	to_extend_s3_timer_z = to_extend_s3_timer;
+
+	return 0;
+}
+
+static struct kernel_param_ops kick_s2_timer_ops = {
+	.set = do_kick_s2_timer,
+	.get = get_kick_s2_timer,
+};
+
+module_param_cb(kick_s2_timer, &kick_s2_timer_ops, NULL, 0644);
+
+static struct kernel_param_ops extend_s3_timer_ops = {
+	.set = do_extend_s3_timer,
+	.get = param_get_bool,
+};
+
+module_param_cb(extend_s3_timer, &extend_s3_timer_ops, &to_extend_s3_timer, 0644);
+
+
 static bool dload_on_uvlo;
 
 static int qpnp_pon_debugfs_uvlo_dload_get(char *buf,
@@ -1985,6 +2147,32 @@ static int read_gen2_pon_off_reason(struct qpnp_pon *pon, u16 *reason,
 
 	return 0;
 }
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+int htc_pon_trigger_reason = -1;
+int htc_pon_power_off_reason = -1;
+int htc_warm_reset_reason1 = -1;
+
+void htc_print_pon_boot_reason(void)
+{
+	/* PON_PON_REASON */
+	printk(KERN_INFO "PM8998 PON_PON_REASON:\n");
+	printk(KERN_INFO "%s\n",qpnp_pon_reason[htc_pon_trigger_reason]);
+
+	/* PON_WARM_RESET_REASON */
+	if(htc_warm_reset_reason1 >= 0){
+		printk(KERN_INFO "PM8998 PON_WARM_RESET_REASON:\n");
+		printk(KERN_INFO "%s\n",qpnp_poff_reason[htc_warm_reset_reason1]);
+	}
+
+	/* PON_POFF_REASON1 */
+	if(htc_pon_power_off_reason >= 0){
+		printk(KERN_INFO "PM8998 PON_POFF_REASON:\n");
+		printk(KERN_INFO "%s\n",qpnp_poff_reason[htc_pon_power_off_reason]);
+	}
+}
+EXPORT_SYMBOL_GPL(htc_print_pon_boot_reason);
+#endif
 
 static int qpnp_pon_probe(struct platform_device *pdev)
 {
@@ -2272,21 +2460,7 @@ static int qpnp_pon_probe(struct platform_device *pdev)
 		}
 	} else {
 		rc = qpnp_pon_set_dbc(pon, delay);
-		if (rc) {
-			dev_err(&pdev->dev,
-				"Unable to set PON debounce delay rc=%d\n", rc);
-			return rc;
-		}
 	}
-	rc = qpnp_pon_get_dbc(pon, &pon->dbc_time_us);
-	if (rc) {
-		dev_err(&pdev->dev,
-			"Unable to get PON debounce delay rc=%d\n", rc);
-		return rc;
-	}
-
-	pon->kpdpwr_dbc_enable = of_property_read_bool(pon->pdev->dev.of_node,
-					"qcom,kpdpwr-sw-debounce");
 
 	rc = of_property_read_u32(pon->pdev->dev.of_node,
 				"qcom,warm-reset-poweroff-type",
@@ -2360,6 +2534,14 @@ static int qpnp_pon_probe(struct platform_device *pdev)
 					"qcom,store-hard-reset-reason");
 
 	qpnp_pon_debugfs_init(pdev);
+
+#ifdef CONFIG_HTC_POWER_DEBUG
+	if(to_spmi_device(pon->pdev->dev.parent)->usid ==0){
+		htc_pon_trigger_reason = pon->pon_trigger_reason;
+		htc_pon_power_off_reason = pon->pon_power_off_reason;
+		htc_warm_reset_reason1 = ffs((int)pon->warm_reset_reason1) -1;
+	}
+#endif
 	return 0;
 }
 

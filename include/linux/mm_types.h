@@ -14,6 +14,7 @@
 #include <linux/page-flags-layout.h>
 #include <asm/page.h>
 #include <asm/mmu.h>
+#include <htc_debug/stability/debug_page_user_trace.h>
 
 #ifndef AT_VECTOR_SIZE_ARCH
 #define AT_VECTOR_SIZE_ARCH 0
@@ -222,6 +223,9 @@ struct page {
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 	int _last_cpupid;
 #endif
+
+	DECLARE_PAGE_USER_TRACE(trace_alloc);
+	DECLARE_PAGE_USER_TRACE(trace_free);
 }
 /*
  * The struct page can be forced to be double word aligned so that atomic ops
@@ -480,7 +484,6 @@ struct mm_struct {
 	 */
 	struct task_struct __rcu *owner;
 #endif
-	struct user_namespace *user_ns;
 
 	/* store ref to file /proc/<pid>/exe symlink points to */
 	struct file __rcu *exe_file;
@@ -523,10 +526,6 @@ struct mm_struct {
 #ifdef CONFIG_HUGETLB_PAGE
 	atomic_long_t hugetlb_usage;
 #endif
-#ifdef CONFIG_MSM_APP_SETTINGS
-	int app_setting;
-#endif
-
 };
 
 static inline void mm_init_cpumask(struct mm_struct *mm)

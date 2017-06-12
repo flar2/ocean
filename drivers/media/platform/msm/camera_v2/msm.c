@@ -707,9 +707,6 @@ static long msm_private_ioctl(struct file *file, void *fh,
 		return 0;
 	}
 
-	if (!event_data)
-		return -EINVAL;
-
 	memset(&event, 0, sizeof(struct v4l2_event));
 	session_id = event_data->session_id;
 	stream_id = event_data->stream_id;
@@ -1015,8 +1012,10 @@ static int msm_open(struct file *filep)
 	BUG_ON(!pvdev);
 
 	/* !!! only ONE open is allowed !!! */
-	if (atomic_cmpxchg(&pvdev->opened, 0, 1))
+	if (atomic_read(&pvdev->opened))
 		return -EBUSY;
+
+	atomic_set(&pvdev->opened, 1);
 
 	spin_lock_irqsave(&msm_pid_lock, flags);
 	msm_pid = get_pid(task_pid(current));

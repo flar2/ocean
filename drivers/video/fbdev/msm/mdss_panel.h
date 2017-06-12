@@ -29,9 +29,6 @@ struct panel_id {
 #define DEFAULT_FRAME_RATE	60
 #define DEFAULT_ROTATOR_FRAME_RATE 120
 #define ROTATOR_LOW_FRAME_RATE 30
-
-#define MDSS_DSI_MAX_ESC_CLK_RATE_HZ	19200000
-
 #define MDSS_DSI_RST_SEQ_LEN	10
 /* worst case prefill lines for all chipsets including all vertical blank */
 #define MDSS_MDP_MAX_PREFILL_FETCH 25
@@ -115,6 +112,12 @@ enum {
 };
 
 enum {
+	MDSS_PANEL_BLANK_BLANK = 0,
+	MDSS_PANEL_BLANK_UNBLANK,
+	MDSS_PANEL_BLANK_LOW_POWER,
+};
+
+enum {
 	MDSS_PANEL_LOW_PERSIST_MODE_OFF = 0,
 	MDSS_PANEL_LOW_PERSIST_MODE_ON,
 };
@@ -189,16 +192,10 @@ struct mdss_panel_cfg {
 
 enum {
 	MDP_INTF_CALLBACK_DSI_WAIT,
-	MDP_INTF_CALLBACK_CHECK_LINE_COUNT,
 };
 
 struct mdss_intf_recovery {
-	int (*fxn)(void *ctx, int event);
-	void *data;
-};
-
-struct mdss_intf_ulp_clamp {
-	int (*fxn)(void *ctx, int intf_num, bool enable);
+	void (*fxn)(void *ctx, int event);
 	void *data;
 };
 
@@ -307,7 +304,6 @@ enum mdss_intf_events {
 	MDSS_EVENT_UPDATE_PANEL_PPM,
 	MDSS_EVENT_DSI_TIMING_DB_CTRL,
 	MDSS_EVENT_AVR_MODE,
-	MDSS_EVENT_REGISTER_CLAMP_HANDLER,
 	MDSS_EVENT_MAX,
 };
 
@@ -364,8 +360,6 @@ static inline char *mdss_panel_intf_event_to_string(int event)
 		return INTF_EVENT_STR(MDSS_EVENT_REGISTER_RECOVERY_HANDLER);
 	case MDSS_EVENT_REGISTER_MDP_CALLBACK:
 		return INTF_EVENT_STR(MDSS_EVENT_REGISTER_MDP_CALLBACK);
-	case MDSS_EVENT_REGISTER_CLAMP_HANDLER:
-		return INTF_EVENT_STR(MDSS_EVENT_REGISTER_CLAMP_HANDLER);
 	case MDSS_EVENT_DSI_PANEL_STATUS:
 		return INTF_EVENT_STR(MDSS_EVENT_DSI_PANEL_STATUS);
 	case MDSS_EVENT_DSI_DYNAMIC_SWITCH:
@@ -533,8 +527,6 @@ struct mipi_panel_info {
 	char lp11_init;
 	u32  init_delay;
 	u32  post_init_delay;
-	u32  num_of_sublinks;
-	u32  lanes_per_sublink;
 };
 
 struct edp_panel_info {
@@ -757,6 +749,23 @@ struct mdss_dsi_dual_pu_roi {
 	struct mdss_rect second_roi;
 	bool enabled;
 };
+/**
+ *  HTC: A Struct for Backlgith 1.0.
+ *  Apply on backlight_transfer function.
+ *  The function will base on brt_data and bl_data to transfer brt and bl value.
+ *  The brt and bl was direct map. For internal value, we will use interpolation method to get transfer value.
+ *
+ *  size: A value to save brt and bl table size.
+ *  brt_data: A point referring to brightness table related data.
+ *  bl_data: A point referring to backlight table related data
+ */
+struct htc_backlight1_table {
+	bool apply_cali;
+	int size;
+	u16 *brt_data;
+	u16 *bl_data;
+	u16 *bl_data_raw;
+};
 
 struct mdss_panel_hdr_properties {
 	bool hdr_enabled;
@@ -771,6 +780,13 @@ struct mdss_panel_hdr_properties {
 	u32 avg_brightness;
 	/* Blackness level supported by panel */
 	u32 blackness_level;
+};
+
+struct calibration_gain {
+	u16 BKL;
+	u16 R;
+	u16 G;
+	u16 B;
 };
 
 struct mdss_panel_info {
@@ -849,7 +865,6 @@ struct mdss_panel_info {
 	bool is_lpm_mode;
 	bool is_split_display; /* two DSIs in one display, pp split or not */
 	bool use_pingpong_split;
-	bool split_link_enabled;
 
 	/*
 	 * index[0] = left layer mixer, value of 0 not valid
@@ -925,8 +940,11 @@ struct mdss_panel_info {
 	/* HDR properties of display panel*/
 	struct mdss_panel_hdr_properties hdr_properties;
 
-	/* esc clk recommended for the panel */
-	u32 esc_clk_rate_hz;
+	/*HTC add as below*/
+	struct htc_backlight1_table brt_bl_table;
+	int camera_blk;
+	int burst_bl_value;
+	struct calibration_gain cali_gain;
 };
 
 struct mdss_panel_timing {
@@ -997,9 +1015,6 @@ struct mdss_panel_data {
 	 * are still on; panel will recover after unblank
 	 */
 	bool panel_disable_mode;
-
-	int panel_te_gpio;
-	struct completion te_done;
 };
 
 struct mdss_panel_debugfs_info {

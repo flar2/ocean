@@ -26,7 +26,8 @@
 #include "smb-reg.h"
 #include "smb-lib.h"
 #include "storm-watch.h"
-#include <linux/pmic-voter.h>
+#include "pmic-voter.h"
+#include <linux/qpnp/qpnp-adc.h>
 
 #define SMB2_DEFAULT_WPWR_UW	8000000
 
@@ -238,12 +239,12 @@ static struct smb_params pm660_params = {
 
 #define STEP_CHARGING_MAX_STEPS	5
 struct smb_dt_props {
+	int	fcc_ua;
 	int	usb_icl_ua;
 	int	dc_icl_ua;
 	int	boost_threshold_ua;
+	int	fv_uv;
 	int	wipower_max_uw;
-	int	min_freq_khz;
-	int	max_freq_khz;
 	u32	step_soc_threshold[STEP_CHARGING_MAX_STEPS - 1];
 	s32	step_cc_delta[STEP_CHARGING_MAX_STEPS];
 	struct	device_node *revid_dev_node;
@@ -252,6 +253,9 @@ struct smb_dt_props {
 	bool	no_battery;
 	bool	hvdcp_disable;
 	bool	auto_recharge_soc;
+#ifdef CONFIG_HTC_BATT
+	int		qc3_vol_limit;
+#endif //CONFIG_HTC_BATT
 };
 
 struct smb2 {
@@ -261,14 +265,30 @@ struct smb2 {
 	bool			bad_part;
 };
 
+#ifdef CONFIG_HTC_BATT
+static struct smb2 *the_chip;
+#endif
+
 static int __debug_mask;
 module_param_named(
 	debug_mask, __debug_mask, int, S_IRUSR | S_IWUSR
 );
 
-#define MICRO_1P5A		1500000
-#define MICRO_P1A		100000
-#define OTG_DEFAULT_DEGLITCH_TIME_MS	50
+#ifdef CONFIG_HTC_BATT
+struct qpnp_vadc_chip	*g_vadc_usb_conn_temp = NULL;
+unsigned int		g_vadc_usb_conn_temp_channel = 0;
+/* Cool Charger */
+static uint32_t         g_htc_chg_ready_gpio = 0;
+static uint32_t         g_htc_chg_enable_gpio = 0;
+
+struct qpnp_vadc_chip           *vadc_usb_in_isen;
+static unsigned int             vadc_usb_in_isen_channel = 0;
+static unsigned int             iusb_rsen;
+static unsigned int             iusb_multiplier;
+#endif //CONFIG_HTC_BATT
+
+#define MICRO_1P5A	1500000
+#define MICRO_P1A	100000
 static int smb2_parse_dt(struct smb2 *chip)
 {
 	struct smb_charger *chg = &chip->chg;
@@ -305,15 +325,18 @@ static int smb2_parse_dt(struct smb2 *chip)
 	chip->dt.no_battery = of_property_read_bool(node,
 						"qcom,batteryless-platform");
 
-	rc = of_property_read_u32(node,
-				"qcom,fcc-max-ua", &chg->batt_profile_fcc_ua);
-	if (rc < 0)
-		chg->batt_profile_fcc_ua = -EINVAL;
+	chg->external_vconn = of_property_read_bool(node,
+						"qcom,external-vconn");
 
 	rc = of_property_read_u32(node,
-				"qcom,fv-max-uv", &chg->batt_profile_fv_uv);
+				"qcom,fcc-max-ua", &chip->dt.fcc_ua);
 	if (rc < 0)
-		chg->batt_profile_fv_uv = -EINVAL;
+		chip->dt.fcc_ua = -EINVAL;
+
+	rc = of_property_read_u32(node,
+				"qcom,fv-max-uv", &chip->dt.fv_uv);
+	if (rc < 0)
+		chip->dt.fv_uv = -EINVAL;
 
 	rc = of_property_read_u32(node,
 				"qcom,usb-icl-ua", &chip->dt.usb_icl_ua);
@@ -335,18 +358,6 @@ static int smb2_parse_dt(struct smb2 *chip)
 				&chip->dt.boost_threshold_ua);
 	if (rc < 0)
 		chip->dt.boost_threshold_ua = MICRO_P1A;
-
-	rc = of_property_read_u32(node,
-				"qcom,min-freq-khz",
-				&chip->dt.min_freq_khz);
-	if (rc < 0)
-		chip->dt.min_freq_khz = -EINVAL;
-
-	rc = of_property_read_u32(node,
-				"qcom,max-freq-khz",
-				&chip->dt.max_freq_khz);
-	if (rc < 0)
-		chip->dt.max_freq_khz = -EINVAL;
 
 	rc = of_property_read_u32(node, "qcom,wipower-max-uw",
 				&chip->dt.wipower_max_uw);
@@ -394,16 +405,63 @@ static int smb2_parse_dt(struct smb2 *chip)
 
 	chg->micro_usb_mode = of_property_read_bool(node, "qcom,micro-usb");
 
+#ifdef CONFIG_HTC_BATT
+	rc = of_property_read_u32(node, "htc,qc3-vol-limit",
+				&chip->dt.qc3_vol_limit);
+	if (rc < 0)
+		chip->dt.qc3_vol_limit = 0x10;
+
+	g_vadc_usb_conn_temp = qpnp_get_vadc(chg->dev, "usb_conn_temp");
+	if(0 > of_property_read_u32(node, "qcom,usb_conn_temp-channel", &g_vadc_usb_conn_temp_channel)) {
+		pr_err("Failed to get vadc_usb_conn_temp_channel\n");
+		g_vadc_usb_conn_temp_channel = 0;
+	}
+
+	vadc_usb_in_isen = qpnp_get_vadc(chg->dev, "usb_in_isen");
+	if(0 > of_property_read_u32(node, "qcom,usb_in_isen-channel", &vadc_usb_in_isen_channel)) {
+		pr_err("[COOL CHARGER]=========Failed to get vadc_usb_in_isen_channel\n");
+		vadc_usb_in_isen_channel = 0;
+	}
+
+	if(0 > of_property_read_u32(node, "iusb_rsen", &iusb_rsen)) {
+		pr_err("[COOL CHARGER]=========Failed to get iusb_rsen\n");
+	}
+
+	if(0 > of_property_read_u32(node, "iusb_multiplier", &iusb_multiplier)) {
+		pr_err("[COOL CHARGER]=========Failed to get iusb_multiplier\n");
+	}
+
+	g_htc_chg_ready_gpio = of_get_named_gpio(node, "htc,htc-chg-ready", 0);
+
+	if (gpio_is_valid(g_htc_chg_ready_gpio)) {
+		rc = gpio_request(g_htc_chg_ready_gpio, "htc_chg_ready");
+		if (rc) {
+			pr_err("[COOL CHARGER]=========Failed to request htc-chg-ready gpio\n");
+		} else {
+			gpio_direction_input(g_htc_chg_ready_gpio);
+		}
+	} else{
+		pr_err("[COOL CHARGER]=========Failed to get htc-chg-ready gpio\n");
+	}
+	/* init chg enable gpio */
+        g_htc_chg_enable_gpio = of_get_named_gpio(node, "htc,htc-chg-enable", 0);
+
+        if (gpio_is_valid(g_htc_chg_enable_gpio)) {
+                rc = gpio_request(g_htc_chg_enable_gpio, "htc_chg_enable");
+                if (rc) {
+                        pr_err("[COOL CHARGER]=========Failed to request htc-chg-enable gpio\n");
+                } else {
+			gpio_direction_output(g_htc_chg_enable_gpio, 0);
+                }
+        } else{
+                pr_err("[COOL CHARGER]=========Failed to get htc-chg-enable gpio\n");
+        }
+#endif //CONFIG_HTC_BATT
+
 	chg->dcp_icl_ua = chip->dt.usb_icl_ua;
 
 	chg->suspend_input_on_debug_batt = of_property_read_bool(node,
 					"qcom,suspend-input-on-debug-batt");
-
-	rc = of_property_read_u32(node, "qcom,otg-deglitch-time-ms",
-					&chg->otg_delay_ms);
-	if (rc < 0)
-		chg->otg_delay_ms = OTG_DEFAULT_DEGLITCH_TIME_MS;
-
 	return 0;
 }
 
@@ -429,9 +487,10 @@ static enum power_supply_property smb2_usb_props[] = {
 	POWER_SUPPLY_PROP_INPUT_CURRENT_NOW,
 	POWER_SUPPLY_PROP_BOOST_CURRENT,
 	POWER_SUPPLY_PROP_PE_START,
+#ifdef CONFIG_HTC_BATT
+	POWER_SUPPLY_PROP_HEALTH,
+#endif //CONFIG_HTC_BATT
 	POWER_SUPPLY_PROP_CTM_CURRENT_MAX,
-	POWER_SUPPLY_PROP_HW_CURRENT_MAX,
-	POWER_SUPPLY_PROP_REAL_TYPE,
 };
 
 static int smb2_usb_get_prop(struct power_supply *psy,
@@ -441,6 +500,9 @@ static int smb2_usb_get_prop(struct power_supply *psy,
 	struct smb2 *chip = power_supply_get_drvdata(psy);
 	struct smb_charger *chg = &chip->chg;
 	int rc = 0;
+#ifdef CONFIG_HTC_BATT
+	u8 reg = 0;
+#endif //CONFIG_HTC_BATT
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_PRESENT:
@@ -450,17 +512,14 @@ static int smb2_usb_get_prop(struct power_supply *psy,
 			rc = smblib_get_prop_usb_present(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_ONLINE:
-		rc = smblib_get_prop_usb_online(chg, val);
-		if (!val->intval)
-			break;
-
-		rc = smblib_get_prop_typec_mode(chg, val);
-		if ((val->intval == POWER_SUPPLY_TYPEC_SOURCE_DEFAULT ||
-			chg->micro_usb_mode) &&
-			chg->real_charger_type == POWER_SUPPLY_TYPE_USB)
-			val->intval = 0;
-		else
+#ifdef CONFIG_HTC_BATT
+		if (chip->bad_part)
 			val->intval = 1;
+		else
+			rc = smblib_get_prop_usb_present(chg, val);
+#else
+		rc = smblib_get_prop_usb_online(chg, val);
+#endif //CONFIG_HTC_BATT
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
 		val->intval = chg->voltage_min_uv;
@@ -478,13 +537,10 @@ static int smb2_usb_get_prop(struct power_supply *psy,
 		rc = smblib_get_prop_usb_current_max(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_TYPE:
-		val->intval = POWER_SUPPLY_TYPE_USB_PD;
-		break;
-	case POWER_SUPPLY_PROP_REAL_TYPE:
 		if (chip->bad_part)
-			val->intval = POWER_SUPPLY_TYPE_USB_PD;
+			val->intval = POWER_SUPPLY_TYPE_USB;
 		else
-			val->intval = chg->real_charger_type;
+			val->intval = chg->usb_psy_desc.type;
 		break;
 	case POWER_SUPPLY_PROP_TYPEC_MODE:
 		if (chg->micro_usb_mode)
@@ -527,14 +583,26 @@ static int smb2_usb_get_prop(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_PD_USB_SUSPEND_SUPPORTED:
 		val->intval = chg->system_suspend_supported;
 		break;
+	case POWER_SUPPLY_PROP_EXT_OTG_CONTROL:
+		rc = smblib_get_ext_otg_control(chg, val);
+		break;
+	case POWER_SUPPLY_PROP_OTG_STATE:
+		rc = smblib_get_prop_otg_state(chg, val);
+		break;
 	case POWER_SUPPLY_PROP_PE_START:
 		rc = smblib_get_pe_start(chg, val);
 		break;
+#ifdef CONFIG_HTC_BATT
+	case POWER_SUPPLY_PROP_HEALTH:
+		rc = smblib_read(chg, USBIN_BASE + INT_RT_STS_OFFSET, &reg);
+		if (reg & USBIN_OV_RT_STS_BIT)
+			val->intval = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
+		else
+			val->intval = POWER_SUPPLY_HEALTH_GOOD;
+		break;
+#endif //CONFIG_HTC_BATT
 	case POWER_SUPPLY_PROP_CTM_CURRENT_MAX:
 		val->intval = get_client_vote(chg->usb_icl_votable, CTM_VOTER);
-		break;
-	case POWER_SUPPLY_PROP_HW_CURRENT_MAX:
-		rc = smblib_get_charge_current(chg, &val->intval);
 		break;
 	default:
 		pr_err("get prop %d is not supported in usb\n", psp);
@@ -555,12 +623,9 @@ static int smb2_usb_set_prop(struct power_supply *psy,
 	struct smb2 *chip = power_supply_get_drvdata(psy);
 	struct smb_charger *chg = &chip->chg;
 	int rc = 0;
-
-	mutex_lock(&chg->lock);
-	if (!chg->typec_present) {
-		rc = -EINVAL;
-		goto unlock;
-	}
+#ifdef CONFIG_HTC_BATT
+	union power_supply_propval pval = {0, };
+#endif //CONFIG_HTC_BATT
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN:
@@ -573,7 +638,16 @@ static int smb2_usb_set_prop(struct power_supply *psy,
 		rc = smblib_set_prop_pd_current_max(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
+#ifdef CONFIG_HTC_BATT
+		if (val->intval < 25000)
+			pval.intval = 500000;
+		else
+			pval.intval = val->intval;
+		rc = smblib_set_prop_usb_current_max(chg, &pval);
+		htc_battery_info_update(psp, pval.intval);
+#else
 		rc = smblib_set_prop_usb_current_max(chg, val);
+#endif //CONFIG_HTC_BATT
 		break;
 	case POWER_SUPPLY_PROP_TYPEC_POWER_ROLE:
 		rc = smblib_set_prop_typec_power_role(chg, val);
@@ -586,6 +660,18 @@ static int smb2_usb_set_prop(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_PD_USB_SUSPEND_SUPPORTED:
 		chg->system_suspend_supported = val->intval;
+		break;
+	case POWER_SUPPLY_PROP_VCONN_SEL:
+		chg->vconn_sel = val->intval;
+		break;
+	case POWER_SUPPLY_PROP_OTG_POWEROFF_SEL:
+		rc = smblib_set_poweroff_sel(chg, val);
+		break;
+	case POWER_SUPPLY_PROP_EXT_OTG_CONTROL:
+		rc = smblib_set_ext_otg_control(chg, val);
+		break;
+	case POWER_SUPPLY_PROP_OTG_STATE:
+		rc = smblib_set_prop_otg_state(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_BOOST_CURRENT:
 		rc = smblib_set_prop_boost_current(chg, val);
@@ -600,8 +686,6 @@ static int smb2_usb_set_prop(struct power_supply *psy,
 		break;
 	}
 
-unlock:
-	mutex_unlock(&chg->lock);
 	return rc;
 }
 
@@ -626,112 +710,23 @@ static int smb2_init_usb_psy(struct smb2 *chip)
 	struct smb_charger *chg = &chip->chg;
 
 	chg->usb_psy_desc.name			= "usb";
-	chg->usb_psy_desc.type			= POWER_SUPPLY_TYPE_USB_PD;
+	chg->usb_psy_desc.type			= POWER_SUPPLY_TYPE_UNKNOWN;
 	chg->usb_psy_desc.properties		= smb2_usb_props;
 	chg->usb_psy_desc.num_properties	= ARRAY_SIZE(smb2_usb_props);
 	chg->usb_psy_desc.get_property		= smb2_usb_get_prop;
 	chg->usb_psy_desc.set_property		= smb2_usb_set_prop;
 	chg->usb_psy_desc.property_is_writeable	= smb2_usb_prop_is_writeable;
 
+	chg->vconn_sel = 0;
+
 	usb_cfg.drv_data = chip;
 	usb_cfg.of_node = chg->dev->of_node;
-	chg->usb_psy = power_supply_register(chg->dev,
+	chg->usb_psy = devm_power_supply_register(chg->dev,
 						  &chg->usb_psy_desc,
 						  &usb_cfg);
 	if (IS_ERR(chg->usb_psy)) {
 		pr_err("Couldn't register USB power supply\n");
 		return PTR_ERR(chg->usb_psy);
-	}
-
-	return 0;
-}
-
-/********************************
- * USB PC_PORT PSY REGISTRATION *
- ********************************/
-static enum power_supply_property smb2_usb_port_props[] = {
-	POWER_SUPPLY_PROP_TYPE,
-	POWER_SUPPLY_PROP_ONLINE,
-};
-
-static int smb2_usb_port_get_prop(struct power_supply *psy,
-		enum power_supply_property psp,
-		union power_supply_propval *val)
-{
-	struct smb2 *chip = power_supply_get_drvdata(psy);
-	struct smb_charger *chg = &chip->chg;
-	int rc = 0;
-
-	switch (psp) {
-	case POWER_SUPPLY_PROP_TYPE:
-		val->intval = POWER_SUPPLY_TYPE_USB;
-		break;
-	case POWER_SUPPLY_PROP_ONLINE:
-		rc = smblib_get_prop_usb_online(chg, val);
-		if (!val->intval)
-			break;
-
-		rc = smblib_get_prop_typec_mode(chg, val);
-		if ((val->intval == POWER_SUPPLY_TYPEC_SOURCE_DEFAULT ||
-			chg->micro_usb_mode) &&
-			chg->real_charger_type == POWER_SUPPLY_TYPE_USB)
-			val->intval = 1;
-		else
-			val->intval = 0;
-		break;
-	default:
-		pr_err_ratelimited("Get prop %d is not supported in pc_port\n",
-				psp);
-		return -EINVAL;
-	}
-
-	if (rc < 0) {
-		pr_debug("Couldn't get prop %d rc = %d\n", psp, rc);
-		return -ENODATA;
-	}
-
-	return 0;
-}
-
-static int smb2_usb_port_set_prop(struct power_supply *psy,
-		enum power_supply_property psp,
-		const union power_supply_propval *val)
-{
-	int rc = 0;
-
-	switch (psp) {
-	default:
-		pr_err_ratelimited("Set prop %d is not supported in pc_port\n",
-				psp);
-		rc = -EINVAL;
-		break;
-	}
-
-	return rc;
-}
-
-static const struct power_supply_desc usb_port_psy_desc = {
-	.name		= "pc_port",
-	.type		= POWER_SUPPLY_TYPE_USB,
-	.properties	= smb2_usb_port_props,
-	.num_properties	= ARRAY_SIZE(smb2_usb_port_props),
-	.get_property	= smb2_usb_port_get_prop,
-	.set_property	= smb2_usb_port_set_prop,
-};
-
-static int smb2_init_usb_port_psy(struct smb2 *chip)
-{
-	struct power_supply_config usb_port_cfg = {};
-	struct smb_charger *chg = &chip->chg;
-
-	usb_port_cfg.drv_data = chip;
-	usb_port_cfg.of_node = chg->dev->of_node;
-	chg->usb_port_psy = power_supply_register(chg->dev,
-						  &usb_port_psy_desc,
-						  &usb_port_cfg);
-	if (IS_ERR(chg->usb_port_psy)) {
-		pr_err("Couldn't register USB pc_port power supply\n");
-		return PTR_ERR(chg->usb_port_psy);
 	}
 
 	return 0;
@@ -743,12 +738,12 @@ static int smb2_init_usb_port_psy(struct smb2 *chip)
 
 static enum power_supply_property smb2_usb_main_props[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_MAX,
+	POWER_SUPPLY_PROP_ICL_REDUCTION,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
 	POWER_SUPPLY_PROP_TYPE,
 	POWER_SUPPLY_PROP_INPUT_CURRENT_SETTLED,
 	POWER_SUPPLY_PROP_INPUT_VOLTAGE_SETTLED,
 	POWER_SUPPLY_PROP_FCC_DELTA,
-	POWER_SUPPLY_PROP_CURRENT_MAX,
 	/*
 	 * TODO move the TEMP and TEMP_MAX properties here,
 	 * and update the thermal balancer to look here
@@ -767,6 +762,9 @@ static int smb2_usb_main_get_prop(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
 		rc = smblib_get_charge_param(chg, &chg->param.fv, &val->intval);
 		break;
+	case POWER_SUPPLY_PROP_ICL_REDUCTION:
+		val->intval = chg->icl_reduction_ua;
+		break;
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
 		rc = smblib_get_charge_param(chg, &chg->param.fcc,
 							&val->intval);
@@ -782,9 +780,6 @@ static int smb2_usb_main_get_prop(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_FCC_DELTA:
 		rc = smblib_get_prop_fcc_delta(chg, val);
-		break;
-	case POWER_SUPPLY_PROP_CURRENT_MAX:
-		rc = smblib_get_icl_current(chg, &val->intval);
 		break;
 	default:
 		pr_debug("get prop %d is not supported in usb-main\n", psp);
@@ -810,11 +805,11 @@ static int smb2_usb_main_set_prop(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
 		rc = smblib_set_charge_param(chg, &chg->param.fv, val->intval);
 		break;
+	case POWER_SUPPLY_PROP_ICL_REDUCTION:
+		rc = smblib_set_icl_reduction(chg, val->intval);
+		break;
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
 		rc = smblib_set_charge_param(chg, &chg->param.fcc, val->intval);
-		break;
-	case POWER_SUPPLY_PROP_CURRENT_MAX:
-		rc = smblib_set_icl_current(chg, val->intval);
 		break;
 	default:
 		pr_err("set prop %d is not supported\n", psp);
@@ -841,7 +836,7 @@ static int smb2_init_usb_main_psy(struct smb2 *chip)
 
 	usb_main_cfg.drv_data = chip;
 	usb_main_cfg.of_node = chg->dev->of_node;
-	chg->usb_main_psy = power_supply_register(chg->dev,
+	chg->usb_main_psy = devm_power_supply_register(chg->dev,
 						  &usb_main_psy_desc,
 						  &usb_main_cfg);
 	if (IS_ERR(chg->usb_main_psy)) {
@@ -943,7 +938,7 @@ static int smb2_init_dc_psy(struct smb2 *chip)
 
 	dc_cfg.drv_data = chip;
 	dc_cfg.of_node = chg->dev->of_node;
-	chg->dc_psy = power_supply_register(chg->dev,
+	chg->dc_psy = devm_power_supply_register(chg->dev,
 						  &dc_psy_desc,
 						  &dc_cfg);
 	if (IS_ERR(chg->dc_psy)) {
@@ -971,9 +966,7 @@ static enum power_supply_property smb2_batt_props[] = {
 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_VOLTAGE_MAX,
-	POWER_SUPPLY_PROP_VOLTAGE_QNOVO,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
-	POWER_SUPPLY_PROP_CURRENT_QNOVO,
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
 	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
@@ -982,6 +975,15 @@ static enum power_supply_property smb2_batt_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_DONE,
 	POWER_SUPPLY_PROP_PARALLEL_DISABLE,
 	POWER_SUPPLY_PROP_SET_SHIP_MODE,
+#ifdef CONFIG_HTC_BATT
+	POWER_SUPPLY_PROP_BATTERY_CHARGING_ENABLED,
+	POWER_SUPPLY_PROP_CHARGING_ENABLED,
+	POWER_SUPPLY_PROP_USB_CONN_TEMP,
+	POWER_SUPPLY_PROP_EXT_OTG_CHG_CONTROL,
+	POWER_SUPPLY_PROP_HTCCHG_GPIO_OPEN,
+	POWER_SUPPLY_PROP_HTC_CHARGE_NOW,
+	POWER_SUPPLY_PROP_HTC_CHARGE_NOW_RAW,
+#endif //CONFIG_HTC_BATT
 	POWER_SUPPLY_PROP_DIE_HEALTH,
 	POWER_SUPPLY_PROP_RERUN_AICL,
 	POWER_SUPPLY_PROP_DP_DM,
@@ -1043,26 +1045,20 @@ static int smb2_batt_get_prop(struct power_supply *psy,
 		rc = smblib_get_prop_batt_voltage_now(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
-		val->intval = get_client_vote(chg->fv_votable,
-				BATT_PROFILE_VOTER);
-		break;
-	case POWER_SUPPLY_PROP_CHARGE_QNOVO_ENABLE:
-		rc = smblib_get_prop_charge_qnovo_enable(chg, val);
+		val->intval = get_client_vote(chg->fv_votable, DEFAULT_VOTER);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_QNOVO:
-		val->intval = get_client_vote_locked(chg->fv_votable,
-				QNOVO_VOTER);
+		val->intval = chg->qnovo_fv_uv;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		rc = smblib_get_prop_batt_current_now(chg, val);
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_QNOVO:
-		val->intval = get_client_vote_locked(chg->fcc_votable,
-				QNOVO_VOTER);
+		val->intval = chg->qnovo_fcc_ua;
 		break;
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
 		val->intval = get_client_vote(chg->fcc_votable,
-					      BATT_PROFILE_VOTER);
+					      DEFAULT_VOTER);
 		break;
 	case POWER_SUPPLY_PROP_TEMP:
 		rc = smblib_get_prop_batt_temp(chg, val);
@@ -1081,6 +1077,32 @@ static int smb2_batt_get_prop(struct power_supply *psy,
 		/* Not in ship mode as long as device is active */
 		val->intval = 0;
 		break;
+#ifdef CONFIG_HTC_BATT
+	case POWER_SUPPLY_PROP_BATTERY_CHARGING_ENABLED:
+		smblib_check_batt_enable(chg, val);
+		break;
+	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
+		smblib_check_chg_enable(chg, val);
+		break;
+	case POWER_SUPPLY_PROP_USB_CONN_TEMP:
+		rc = smblib_get_usb_conn_temp(chg, g_vadc_usb_conn_temp, g_vadc_usb_conn_temp_channel, val);
+		break;
+	case POWER_SUPPLY_PROP_EXT_OTG_CHG_CONTROL:
+		rc  = smblib_get_ext_otg_chg_control(chg, val);
+		break;
+        case POWER_SUPPLY_PROP_HTCCHG_GPIO_OPEN:
+                if(vadc_usb_in_isen_channel >  0)
+			val->intval = gpio_get_value(g_htc_chg_enable_gpio);
+                break;
+	case POWER_SUPPLY_PROP_HTC_CHARGE_NOW:
+		if(vadc_usb_in_isen_channel > 0)
+			smblib_get_usb_in_isen_current_ma(chg, iusb_rsen, iusb_multiplier, vadc_usb_in_isen, vadc_usb_in_isen_channel, val);
+		break;
+	case POWER_SUPPLY_PROP_HTC_CHARGE_NOW_RAW:
+		if(vadc_usb_in_isen_channel > 0)
+			smblib_get_usb_in_isen_adc(chg, vadc_usb_in_isen, vadc_usb_in_isen_channel, val);
+		break;
+#endif //CONFIG_HTC_BATT
 	case POWER_SUPPLY_PROP_DIE_HEALTH:
 		rc = smblib_get_prop_die_health(chg, val);
 		break;
@@ -1099,6 +1121,11 @@ static int smb2_batt_get_prop(struct power_supply *psy,
 		pr_debug("Couldn't get prop %d rc = %d\n", psp, rc);
 		return -ENODATA;
 	}
+
+#ifdef CONFIG_HTC_BATT
+	if (psp != POWER_SUPPLY_PROP_CAPACITY)
+		htc_battery_info_update(psp, val->intval);
+#endif //CONFIG_HTC_BATT
 
 	return 0;
 }
@@ -1124,37 +1151,18 @@ static int smb2_batt_set_prop(struct power_supply *psy,
 		vote(chg->pl_disable_votable, USER_VOTER, (bool)val->intval, 0);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
-		chg->batt_profile_fv_uv = val->intval;
-		vote(chg->fv_votable, BATT_PROFILE_VOTER, true, val->intval);
-		break;
-	case POWER_SUPPLY_PROP_CHARGE_QNOVO_ENABLE:
-		rc = smblib_set_prop_charge_qnovo_enable(chg, val);
+		vote(chg->fv_votable, DEFAULT_VOTER, true, val->intval);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_QNOVO:
-		if (val->intval == -EINVAL) {
-			vote(chg->fv_votable, BATT_PROFILE_VOTER,
-					true, chg->batt_profile_fv_uv);
-			vote(chg->fv_votable, QNOVO_VOTER, false, 0);
-		} else {
-			vote(chg->fv_votable, QNOVO_VOTER, true, val->intval);
-			vote(chg->fv_votable, BATT_PROFILE_VOTER, false, 0);
-		}
+		chg->qnovo_fv_uv = val->intval;
+		rc = rerun_election(chg->fv_votable);
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_QNOVO:
-		vote(chg->pl_disable_votable, PL_QNOVO_VOTER,
-			val->intval != -EINVAL && val->intval < 2000000, 0);
-		if (val->intval == -EINVAL) {
-			vote(chg->fcc_votable, BATT_PROFILE_VOTER,
-					true, chg->batt_profile_fcc_ua);
-			vote(chg->fcc_votable, QNOVO_VOTER, false, 0);
-		} else {
-			vote(chg->fcc_votable, QNOVO_VOTER, true, val->intval);
-			vote(chg->fcc_votable, BATT_PROFILE_VOTER, false, 0);
-		}
+		chg->qnovo_fcc_ua = val->intval;
+		rc = rerun_election(chg->fcc_votable);
 		break;
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
-		chg->batt_profile_fcc_ua = val->intval;
-		vote(chg->fcc_votable, BATT_PROFILE_VOTER, true, val->intval);
+		vote(chg->fcc_votable, DEFAULT_VOTER, true, val->intval);
 		break;
 	case POWER_SUPPLY_PROP_SET_SHIP_MODE:
 		/* Not in ship mode as long as the device is active */
@@ -1165,14 +1173,35 @@ static int smb2_batt_set_prop(struct power_supply *psy,
 				POWER_SUPPLY_PROP_SET_SHIP_MODE, val);
 		rc = smblib_set_prop_ship_mode(chg, val);
 		break;
+#ifdef CONFIG_HTC_BATT
+	case POWER_SUPPLY_PROP_BATTERY_CHARGING_ENABLED:
+		rc = smblib_set_bat_fet_off(chg, !val->intval);
+		break;
+	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
+		rc = smblib_set_usb_suspend(chg, !val->intval);
+		break;
+	case POWER_SUPPLY_PROP_EXT_OTG_CHG_CONTROL:
+		rc = smblib_set_ext_otg_chg_control(chg, val);
+		break;
+	case POWER_SUPPLY_PROP_HTCCHG_GPIO_OPEN:
+		if(val->intval < 2){
+                        pr_info("[CC] ready Set GPIO : %d\n", val->intval);
+			gpio_direction_output(g_htc_chg_enable_gpio, val->intval);
+		}
+		if(val->intval == 1){
+		        pr_info("[CC] ready Set output: %d\n", val->intval);
+			gpio_direction_output(g_htc_chg_ready_gpio, 0);
+		}else if(val->intval == 2){
+                        pr_info("[CC] ready Set input: %d\n", val->intval);
+			gpio_direction_input(g_htc_chg_ready_gpio);
+		}
+                break;
+#endif //CONFIG_HTC_BATT
 	case POWER_SUPPLY_PROP_RERUN_AICL:
 		rc = smblib_rerun_aicl(chg);
 		break;
 	case POWER_SUPPLY_PROP_DP_DM:
 		rc = smblib_dp_dm(chg, val->intval);
-		break;
-	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED:
-		rc = smblib_set_prop_input_current_limited(chg, val);
 		break;
 	default:
 		rc = -EINVAL;
@@ -1189,9 +1218,14 @@ static int smb2_batt_prop_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_SYSTEM_TEMP_LEVEL:
 	case POWER_SUPPLY_PROP_CAPACITY:
 	case POWER_SUPPLY_PROP_PARALLEL_DISABLE:
+#ifdef CONFIG_HTC_BATT
+	case POWER_SUPPLY_PROP_BATTERY_CHARGING_ENABLED:
+	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
+	case POWER_SUPPLY_PROP_EXT_OTG_CHG_CONTROL:
+        case POWER_SUPPLY_PROP_HTCCHG_GPIO_OPEN:
+#endif //CONFIG_HTC_BATT
 	case POWER_SUPPLY_PROP_DP_DM:
 	case POWER_SUPPLY_PROP_RERUN_AICL:
-	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMITED:
 		return 1;
 	default:
 		break;
@@ -1218,7 +1252,7 @@ static int smb2_init_batt_psy(struct smb2 *chip)
 
 	batt_cfg.drv_data = chg;
 	batt_cfg.of_node = chg->dev->of_node;
-	chg->batt_psy = power_supply_register(chg->dev,
+	chg->batt_psy = devm_power_supply_register(chg->dev,
 						   &batt_psy_desc,
 						   &batt_cfg);
 	if (IS_ERR(chg->batt_psy)) {
@@ -1286,9 +1320,6 @@ static int smb2_init_vconn_regulator(struct smb2 *chip)
 	struct smb_charger *chg = &chip->chg;
 	struct regulator_config cfg = {};
 	int rc = 0;
-
-	if (chg->micro_usb_mode)
-		return 0;
 
 	chg->vconn_vreg = devm_kzalloc(chg->dev, sizeof(*chg->vconn_vreg),
 				      GFP_KERNEL);
@@ -1486,12 +1517,10 @@ static int smb2_configure_typec(struct smb_charger *chg)
 		return rc;
 	}
 
-	/* disable try.SINK mode and legacy cable IRQs */
-	rc = smblib_masked_write(chg, TYPE_C_CFG_3_REG, EN_TRYSINK_MODE_BIT |
-				TYPEC_NONCOMPLIANT_LEGACY_CABLE_INT_EN_BIT |
-				TYPEC_LEGACY_CABLE_INT_EN_BIT, 0);
+	/* disable try.SINK mode */
+	rc = smblib_masked_write(chg, TYPE_C_CFG_3_REG, EN_TRYSINK_MODE_BIT, 0);
 	if (rc < 0) {
-		dev_err(chg->dev, "Couldn't set Type-C config rc=%d\n", rc);
+		dev_err(chg->dev, "Couldn't set TRYSINK_MODE rc=%d\n", rc);
 		return rc;
 	}
 
@@ -1503,10 +1532,9 @@ static int smb2_disable_typec(struct smb_charger *chg)
 	int rc;
 
 	/* Move to typeC mode */
-	/* configure FSM in idle state and disable UFP_ENABLE bit */
+	/* configure FSM in idle state */
 	rc = smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
-			TYPEC_DISABLE_CMD_BIT | UFP_EN_CMD_BIT,
-			TYPEC_DISABLE_CMD_BIT);
+			TYPEC_DISABLE_CMD_BIT, TYPEC_DISABLE_CMD_BIT);
 	if (rc < 0) {
 		dev_err(chg->dev, "Couldn't put FSM in idle rc=%d\n", rc);
 		return rc;
@@ -1566,6 +1594,11 @@ static int smb2_disable_typec(struct smb_charger *chg)
 	return rc;
 }
 
+#ifdef CONFIG_HTC_BATT
+#define HVDCP_PULSE_COUNT_QC2P0_9V	0x1	// limit vbus 9V for QC2
+#define HVDCP_PULSE_COUNT_QC3P0_9V	0xA	// limit vbus 7V for QC3
+#define JEITA_FVCOMP_MINUS_1500		0x14 // minus 150mV
+#endif //CONFIG_HTC_BATT
 static int smb2_init_hw(struct smb2 *chip)
 {
 	struct smb_charger *chg = &chip->chg;
@@ -1575,13 +1608,11 @@ static int smb2_init_hw(struct smb2 *chip)
 	if (chip->dt.no_battery)
 		chg->fake_capacity = 50;
 
-	if (chg->batt_profile_fcc_ua < 0)
-		smblib_get_charge_param(chg, &chg->param.fcc,
-				&chg->batt_profile_fcc_ua);
+	if (chip->dt.fcc_ua < 0)
+		smblib_get_charge_param(chg, &chg->param.fcc, &chip->dt.fcc_ua);
 
-	if (chg->batt_profile_fv_uv < 0)
-		smblib_get_charge_param(chg, &chg->param.fv,
-				&chg->batt_profile_fv_uv);
+	if (chip->dt.fv_uv < 0)
+		smblib_get_charge_param(chg, &chg->param.fv, &chip->dt.fv_uv);
 
 	smblib_get_charge_param(chg, &chg->param.usb_icl,
 				&chg->default_icl_ua);
@@ -1591,16 +1622,6 @@ static int smb2_init_hw(struct smb2 *chip)
 	if (chip->dt.dc_icl_ua < 0)
 		smblib_get_charge_param(chg, &chg->param.dc_icl,
 					&chip->dt.dc_icl_ua);
-
-	if (chip->dt.min_freq_khz > 0) {
-		chg->param.freq_buck.min_u = chip->dt.min_freq_khz;
-		chg->param.freq_boost.min_u = chip->dt.min_freq_khz;
-	}
-
-	if (chip->dt.max_freq_khz > 0) {
-		chg->param.freq_buck.max_u = chip->dt.max_freq_khz;
-		chg->param.freq_boost.max_u = chip->dt.max_freq_khz;
-	}
 
 	/* set a slower soft start setting for OTG */
 	rc = smblib_masked_write(chg, DC_ENG_SSUPPLY_CFG2_REG,
@@ -1620,6 +1641,18 @@ static int smb2_init_hw(struct smb2 *chip)
 	}
 
 	chg->boost_threshold_ua = chip->dt.boost_threshold_ua;
+
+	rc = smblib_read(chg, RID_CC_CONTROL_7_0_REG, &stat);
+	if (rc < 0)
+		pr_err("Couldn't read RID_CC_CONTROL_7_0_REG rc=%d\n", rc);
+	else {
+		pr_info("vconn settings is %x\n", stat);
+		if (!(stat & VCONN_ILIM500MA_BIT)) {
+			rc = smblib_masked_write(chg, RID_CC_CONTROL_7_0_REG,
+					VCONN_ILIM500MA_BIT, 1);
+			pr_info("%s: set vconn threshold to 500mA\n", __func__);
+		}
+	}
 
 	rc = smblib_read(chg, APSD_RESULT_STATUS_REG, &stat);
 	if (rc < 0) {
@@ -1642,17 +1675,15 @@ static int smb2_init_hw(struct smb2 *chip)
 	vote(chg->dc_suspend_votable,
 		DEFAULT_VOTER, chip->dt.no_battery, 0);
 	vote(chg->fcc_votable,
-		BATT_PROFILE_VOTER, true, chg->batt_profile_fcc_ua);
+		DEFAULT_VOTER, true, chip->dt.fcc_ua);
 	vote(chg->fv_votable,
-		BATT_PROFILE_VOTER, true, chg->batt_profile_fv_uv);
+		DEFAULT_VOTER, true, chip->dt.fv_uv);
 	vote(chg->dc_icl_votable,
 		DEFAULT_VOTER, true, chip->dt.dc_icl_ua);
-	vote(chg->hvdcp_disable_votable_indirect, PD_INACTIVE_VOTER,
-			true, 0);
-	vote(chg->hvdcp_disable_votable_indirect, VBUS_CC_SHORT_VOTER,
-			true, 0);
 	vote(chg->hvdcp_disable_votable_indirect, DEFAULT_VOTER,
 		chip->dt.hvdcp_disable, 0);
+	vote(chg->hvdcp_disable_votable_indirect, PD_INACTIVE_VOTER,
+			true, 0);
 	vote(chg->pd_disallowed_votable_indirect, CC_DETACHED_VOTER,
 			true, 0);
 	vote(chg->pd_disallowed_votable_indirect, HVDCP_TIMEOUT_VOTER,
@@ -1718,6 +1749,13 @@ static int smb2_init_hw(struct smb2 *chip)
 		return rc;
 	}
 
+	rc = smblib_masked_write(chg, QNOVO_PT_ENABLE_CMD_REG,
+			QNOVO_PT_ENABLE_CMD_BIT, QNOVO_PT_ENABLE_CMD_BIT);
+	if (rc < 0) {
+		dev_err(chg->dev, "Couldn't enable qnovo rc=%d\n", rc);
+		return rc;
+	}
+
 	/* configure step charging */
 	rc = smb2_config_step_charging(chip);
 	if (rc < 0) {
@@ -1738,16 +1776,6 @@ static int smb2_init_hw(struct smb2 *chip)
 				 STAT_SW_OVERRIDE_CFG_BIT, 0);
 	if (rc < 0) {
 		dev_err(chg->dev, "Couldn't disable SW STAT override rc=%d\n",
-			rc);
-		return rc;
-	}
-
-	/* disable h/w autonomous parallel charging control */
-	rc = smblib_masked_write(chg, MISC_CFG_REG,
-				 STAT_PARALLEL_1400MA_EN_CFG_BIT, 0);
-	if (rc < 0) {
-		dev_err(chg->dev,
-			"Couldn't disable h/w autonomous parallel control rc=%d\n",
 			rc);
 		return rc;
 	}
@@ -1836,6 +1864,70 @@ static int smb2_init_hw(struct smb2 *chip)
 			return rc;
 		}
 	}
+
+#ifdef CONFIG_HTC_BATT
+	/* Disable parallel charging */
+	vote(chg->pl_disable_votable, USER_VOTER, true, 0);
+
+	/* debug flag 6 4 set, disable hw soft/hard temp monitor */
+	if (get_kernel_flag() & KERNEL_FLAG_KEEP_CHARG_ON) {
+		rc = smblib_masked_write(chg, JEITA_EN_CFG_REG,
+				JEITA_EN_FVCOMP_IN_CV_BIT | JEITA_EN_HARDLIMIT_BIT |
+				JEITA_EN_HOT_SL_FCV_BIT | JEITA_EN_COLD_SL_FCV_BIT |
+				JEITA_EN_HOT_SL_CCC_BIT | JEITA_EN_COLD_SL_CCC_BIT, 0);
+		if (rc < 0) {
+			dev_err(chg->dev, "Couldn't disable hw soft/hard temp monitor = %d\n", rc);
+			return rc;
+		}
+	} else {
+		rc = smblib_masked_write(chg, JEITA_EN_CFG_REG,
+				JEITA_EN_FVCOMP_IN_CV_BIT | JEITA_EN_HARDLIMIT_BIT |
+				JEITA_EN_HOT_SL_FCV_BIT | JEITA_EN_COLD_SL_FCV_BIT |
+				JEITA_EN_HOT_SL_CCC_BIT | JEITA_EN_COLD_SL_CCC_BIT,
+				JEITA_EN_FVCOMP_IN_CV_BIT | JEITA_EN_HARDLIMIT_BIT | JEITA_EN_HOT_SL_FCV_BIT);
+		if (rc < 0) {
+			dev_err(chg->dev, "Couldn't disable hw soft/hard temp monitor = %d\n", rc);
+			return rc;
+		}
+
+		rc = smblib_masked_write(chg, JEITA_FVCOMP_CFG_REG,
+				JEITA_FVCOMP_MASK, JEITA_FVCOMP_MINUS_1500);
+		if (rc < 0) {
+			dev_err(chg->dev, "Couldn't disable JEITA FV COMP = %d\n", rc);
+			return rc;
+		}
+	}
+
+	/* debug flag 6 4 or 6 2000 set, disable safety timer */
+	if ((get_kernel_flag() & KERNEL_FLAG_KEEP_CHARG_ON) ||
+		(get_kernel_flag() & KERNEL_FLAG_DISABLE_SAFETY_TIMER)){
+				rc = smblib_masked_write(chg, CHGR_SAFETY_TIMER_ENABLE_CFG_REG,
+						FAST_CHARGE_SAFETY_TIMER_EN_BIT, 0);
+				if (rc < 0) {
+					dev_err(chg->dev, "Couldn't disable safety timer = %d\n", rc);
+					return rc;
+				}
+	}
+
+
+	// Disable HVDCP 12V
+	rc = smblib_masked_write(chg, USB_HVDCP_PULSE_COUNT_MAX,
+				 HVDCP_PULSE_COUNT_MAX_QC2P0 | HVDCP_PULSE_COUNT_MAX_QC3P0,
+				 (HVDCP_PULSE_COUNT_QC2P0_9V << HVDCP_PULSE_COUNT_QC2P0_SHIFT) |
+				 chip->dt.qc3_vol_limit);
+	if (rc < 0) {
+		dev_err(chg->dev, "Couldn't configure hvdcp voltage limit rc=%d\n",
+			rc);
+		return rc;
+	}
+	rc = smblib_masked_write(chg, USBIN_ADAPTER_ALLOW_CFG_REG,
+				 USBIN_ADAPTER_ALLOW_MASK, USBIN_ADAPTER_ALLOW_5V_TO_9V);
+	if (rc < 0) {
+		dev_err(chg->dev, "Couldn't configure hvdcp voltage limit rc=%d\n",
+			rc);
+		return rc;
+	}
+#endif //CONFIG_HTC_BATT
 
 	return rc;
 }
@@ -2105,6 +2197,7 @@ static struct smb_irq_info smb2_irqs[] = {
 		.name		= "switcher-power-ok",
 		.handler	= smblib_handle_switcher_power_ok,
 		.storm_data	= {true, 1000, 3},
+		.wake		= true,
 	},
 };
 
@@ -2188,30 +2281,54 @@ static int smb2_request_interrupts(struct smb2 *chip)
 	return rc;
 }
 
-static void smb2_free_interrupts(struct smb_charger *chg)
+#ifdef CONFIG_HTC_BATT
+// TODO: Add register dump
+int charger_dump_all(void)
 {
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(smb2_irqs); i++) {
-		if (smb2_irqs[i].irq > 0) {
-			if (smb2_irqs[i].wake)
-				disable_irq_wake(smb2_irqs[i].irq);
-
-			devm_free_irq(chg->dev, smb2_irqs[i].irq,
-					smb2_irqs[i].irq_data);
-		}
-	}
+	return 0;
 }
 
-static void smb2_disable_interrupts(struct smb_charger *chg)
+int charger_register_write(u16 addr, u8 mask, u8 val)
 {
-	int i;
+	struct smb_charger *chg;
+	int rc = 0;
 
-	for (i = 0; i < ARRAY_SIZE(smb2_irqs); i++) {
-		if (smb2_irqs[i].irq > 0)
-			disable_irq(smb2_irqs[i].irq);
-	}
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+        }
+        chg = &the_chip->chg;
+
+	rc = smblib_masked_write(chg, addr, mask, val);
+	if (rc < 0)
+		dev_err(chg->dev, "Couldn't write register 0x%02x, rc=%d\n", addr, rc);
+
+	return rc;
 }
+
+int charger_register_read(u16 addr, u8 *val)
+{
+	struct smb_charger *chg;
+	int rc = 0;
+
+	if (!the_chip) {
+		pr_err("called before init\n");
+		return -EINVAL;
+	}
+	chg = &the_chip->chg;
+
+	rc = smblib_read(chg, addr, val);
+	if (rc < 0)
+		pr_err("Couldn't read register 0x%02x, rc=%d\n", addr, rc);
+
+	return rc;
+}
+
+bool is_cool_charger(void)
+{
+	return (vadc_usb_in_isen_channel == 0)? false : true;
+}
+#endif //CONFIG_HTC_BATT
 
 #if defined(CONFIG_DEBUG_FS)
 
@@ -2340,7 +2457,7 @@ static int smb2_probe(struct platform_device *pdev)
 	rc = smb2_init_vconn_regulator(chip);
 	if (rc < 0) {
 		pr_err("Couldn't initialize vconn regulator rc=%d\n",
-				rc);
+			rc);
 		goto cleanup;
 	}
 
@@ -2380,13 +2497,7 @@ static int smb2_probe(struct platform_device *pdev)
 
 	rc = smb2_init_usb_main_psy(chip);
 	if (rc < 0) {
-		pr_err("Couldn't initialize usb main psy rc=%d\n", rc);
-		goto cleanup;
-	}
-
-	rc = smb2_init_usb_port_psy(chip);
-	if (rc < 0) {
-		pr_err("Couldn't initialize usb pc_port psy rc=%d\n", rc);
+		pr_err("Couldn't initialize usb psy rc=%d\n", rc);
 		goto cleanup;
 	}
 
@@ -2430,7 +2541,7 @@ static int smb2_probe(struct platform_device *pdev)
 	rc = smblib_get_prop_batt_health(chg, &val);
 	if (rc < 0) {
 		pr_err("Couldn't get batt health rc=%d\n", rc);
-		val.intval = POWER_SUPPLY_HEALTH_UNKNOWN;
+		goto cleanup;
 	}
 	batt_health = val.intval;
 
@@ -2441,32 +2552,33 @@ static int smb2_probe(struct platform_device *pdev)
 	}
 	batt_charge_type = val.intval;
 
-	device_init_wakeup(chg->dev, true);
+#ifdef CONFIG_HTC_BATT
+	htc_battery_create_attrs(&chg->batt_psy->dev);
+
+	if (get_kernel_flag() & KERNEL_FLAG_ENABLE_BMS_CHARGER_LOG)
+		__debug_mask = 0xF;
+	else
+		__debug_mask = PR_INTERRUPT;
+
+	htc_battery_probe_process(CHARGER_PROBE_DONE);
+	the_chip = chip;
+#endif //CONFIG_HTC_BATT
 
 	pr_info("QPNP SMB2 probed successfully usb:present=%d type=%d batt:present = %d health = %d charge = %d\n",
-		usb_present, chg->real_charger_type,
+		usb_present, chg->usb_psy_desc.type,
 		batt_present, batt_health, batt_charge_type);
 	return rc;
 
 cleanup:
-	smb2_free_interrupts(chg);
-	if (chg->batt_psy)
-		power_supply_unregister(chg->batt_psy);
-	if (chg->usb_main_psy)
-		power_supply_unregister(chg->usb_main_psy);
+	smblib_deinit(chg);
 	if (chg->usb_psy)
 		power_supply_unregister(chg->usb_psy);
-	if (chg->usb_port_psy)
-		power_supply_unregister(chg->usb_port_psy);
-	if (chg->dc_psy)
-		power_supply_unregister(chg->dc_psy);
+	if (chg->batt_psy)
+		power_supply_unregister(chg->batt_psy);
 	if (chg->vconn_vreg && chg->vconn_vreg->rdev)
-		devm_regulator_unregister(chg->dev, chg->vconn_vreg->rdev);
+		regulator_unregister(chg->vconn_vreg->rdev);
 	if (chg->vbus_vreg && chg->vbus_vreg->rdev)
-		devm_regulator_unregister(chg->dev, chg->vbus_vreg->rdev);
-
-	smblib_deinit(chg);
-
+		regulator_unregister(chg->vbus_vreg->rdev);
 	platform_set_drvdata(pdev, NULL);
 	return rc;
 }
@@ -2478,7 +2590,6 @@ static int smb2_remove(struct platform_device *pdev)
 
 	power_supply_unregister(chg->batt_psy);
 	power_supply_unregister(chg->usb_psy);
-	power_supply_unregister(chg->usb_port_psy);
 	regulator_unregister(chg->vconn_vreg->rdev);
 	regulator_unregister(chg->vbus_vreg->rdev);
 
@@ -2490,9 +2601,6 @@ static void smb2_shutdown(struct platform_device *pdev)
 {
 	struct smb2 *chip = platform_get_drvdata(pdev);
 	struct smb_charger *chg = &chip->chg;
-
-	/* disable all interrupts */
-	smb2_disable_interrupts(chg);
 
 	/* configure power role for UFP */
 	smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,

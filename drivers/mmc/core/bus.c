@@ -339,6 +339,11 @@ int mmc_add_card(struct mmc_card *card)
 	switch (card->type) {
 	case MMC_TYPE_MMC:
 		type = "MMC";
+		if (stats_workqueue && !card->host->perf_enable) {
+			card->host->perf_enable = true;
+			queue_delayed_work(stats_workqueue, &card->host->stats_work,
+				msecs_to_jiffies(MMC_STATS_INTERVAL));
+		}
 		break;
 	case MMC_TYPE_SD:
 		type = "SD";
@@ -347,6 +352,11 @@ int mmc_add_card(struct mmc_card *card)
 				type = "SDXC";
 			else
 				type = "SDHC";
+		}
+		if (stats_workqueue && !card->host->perf_enable) {
+			card->host->perf_enable = true;
+			queue_delayed_work(stats_workqueue, &card->host->stats_work,
+				msecs_to_jiffies(MMC_STATS_INTERVAL));
 		}
 		break;
 	case MMC_TYPE_SDIO:
@@ -417,18 +427,18 @@ void mmc_remove_card(struct mmc_card *card)
 
 	if (mmc_card_present(card)) {
 		if (mmc_host_is_spi(card->host)) {
-			pr_info("%s: SPI card removed\n",
-				mmc_hostname(card->host));
+			pr_info("mmc0: SPI card removed\n");
 		} else {
-			pr_info("%s: card %04x removed\n",
-				mmc_hostname(card->host), card->rca);
+			pr_info("mmc0: card removed\n");
 		}
 		device_del(&card->dev);
 		of_node_put(card->dev.of_node);
 	}
 
 	kfree(card->wr_pack_stats.packing_events);
+	kfree(card->cached_ext_csd);
 
 	put_device(&card->dev);
+	pr_info("mmc0: %s done\n", __func__);
 }
 

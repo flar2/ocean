@@ -19,11 +19,12 @@
 #include <linux/qpnp/qpnp-revid.h>
 #include <linux/input/qpnp-power-on.h>
 #include <linux/irq.h>
-#include <linux/pmic-voter.h>
 #include "smb-lib.h"
 #include "smb-reg.h"
-#include "battery.h"
 #include "storm-watch.h"
+#include "pmic-voter.h"
+#include <linux/nanohub_htc.h>
+#include <linux/qpnp/qpnp-adc.h>
 
 #define smblib_err(chg, fmt, ...)		\
 	pr_err("%s: %s: " fmt, chg->name,	\
@@ -38,6 +39,11 @@
 			pr_debug("%s: %s: " fmt, chg->name,	\
 				__func__, ##__VA_ARGS__);	\
 	} while (0)
+
+#ifdef CONFIG_HTC_BATT
+unsigned int g_cc_floating_cnt = 0;
+static bool is_gc_charger_vote_usb_irq_enable = false;
+#endif //CONFIG_HTC_BATT
 
 static bool is_secure(struct smb_charger *chg, int addr)
 {
@@ -68,6 +74,10 @@ int smblib_multibyte_read(struct smb_charger *chg, u16 addr, u8 *val,
 int smblib_masked_write(struct smb_charger *chg, u16 addr, u8 mask, u8 val)
 {
 	int rc = 0;
+#ifdef CONFIG_HTC_BATT
+	u8 debug = 0;
+	int dbg_rc = 0;
+#endif //CONFIG_HTC_BATT
 
 	mutex_lock(&chg->write_lock);
 	if (is_secure(chg, addr)) {
@@ -78,6 +88,14 @@ int smblib_masked_write(struct smb_charger *chg, u16 addr, u8 mask, u8 val)
 
 	rc = regmap_update_bits(chg->regmap, addr, mask, val);
 
+#ifdef CONFIG_HTC_BATT
+	if (addr == USBIN_CMD_IL_REG){
+		dbg_rc = smblib_read(chg, USBIN_CMD_IL_REG, &debug);
+		if (dbg_rc >= 0)
+			smblib_err(chg, "DEBUG: addr = 0x%X, mask = 0x%X, val = 0x%X, after write value = 0x%X\n", addr, mask, val, debug);
+	}
+#endif //CONFIG_HTC_BATT
+
 unlock:
 	mutex_unlock(&chg->write_lock);
 	return rc;
@@ -86,6 +104,10 @@ unlock:
 int smblib_write(struct smb_charger *chg, u16 addr, u8 val)
 {
 	int rc = 0;
+#ifdef CONFIG_HTC_BATT
+	u8 debug = 0;
+	int dbg_rc = 0;
+#endif //CONFIG_HTC_BATT
 
 	mutex_lock(&chg->write_lock);
 
@@ -96,6 +118,14 @@ int smblib_write(struct smb_charger *chg, u16 addr, u8 val)
 	}
 
 	rc = regmap_write(chg->regmap, addr, val);
+
+#ifdef CONFIG_HTC_BATT
+	if (addr == USBIN_CMD_IL_REG){
+		dbg_rc = smblib_read(chg, USBIN_CMD_IL_REG, &debug);
+		if (dbg_rc >= 0)
+			smblib_err(chg, "DEBUG: addr = 0x%X, val = 0x%X, after write value = 0x%X\n", addr, val, debug);
+	}
+#endif //CONFIG_HTC_BATT
 
 unlock:
 	mutex_unlock(&chg->write_lock);
@@ -162,14 +192,39 @@ static int smblib_get_jeita_cc_delta(struct smb_charger *chg, int *cc_delta_ua)
 int smblib_icl_override(struct smb_charger *chg, bool override)
 {
 	int rc;
+	bool override_status;
+	u8 stat;
+	u16 reg;
 
-	rc = smblib_masked_write(chg, USBIN_LOAD_CFG_REG,
-				ICL_OVERRIDE_AFTER_APSD_BIT,
-				override ? ICL_OVERRIDE_AFTER_APSD_BIT : 0);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't override ICL rc=%d\n", rc);
+	switch (chg->smb_version) {
+	case PMI8998_SUBTYPE:
+		reg = APSD_RESULT_STATUS_REG;
+		break;
+	case PM660_SUBTYPE:
+		reg = AICL_STATUS_REG;
+		break;
+	default:
+		smblib_dbg(chg, PR_MISC, "Unknown chip version=%x\n",
+				chg->smb_version);
+		return -EINVAL;
+	}
 
-	return rc;
+	rc = smblib_read(chg, reg, &stat);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read reg=%x rc=%d\n", reg, rc);
+		return rc;
+	}
+	override_status = (bool)(stat & ICL_OVERRIDE_LATCH_BIT);
+
+	if (override != override_status) {
+		rc = smblib_masked_write(chg, CMD_APSD_REG,
+				ICL_OVERRIDE_BIT, ICL_OVERRIDE_BIT);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't override ICL rc=%d\n", rc);
+			return rc;
+		}
+	}
+	return 0;
 }
 
 /********************
@@ -236,7 +291,11 @@ static const struct apsd_result const smblib_apsd_results[] = {
 	[UNKNOWN] = {
 		.name	= "UNKNOWN",
 		.bit	= 0,
+#ifdef CONFIG_HTC_BATT
 		.pst	= POWER_SUPPLY_TYPE_UNKNOWN
+#else
+		.pst	= POWER_SUPPLY_TYPE_USB
+#endif //CONFIG_HTC_BATT
 	},
 	[SDP] = {
 		.name	= "SDP",
@@ -261,7 +320,11 @@ static const struct apsd_result const smblib_apsd_results[] = {
 	[FLOAT] = {
 		.name	= "FLOAT",
 		.bit	= FLOAT_CHARGER_BIT,
+#ifdef CONFIG_HTC_BATT
+		.pst	= POWER_SUPPLY_TYPE_USB
+#else
 		.pst	= POWER_SUPPLY_TYPE_USB_DCP
+#endif //CONFIG_HTC_BATT
 	},
 	[HVDCP2] = {
 		.name	= "HVDCP2",
@@ -427,12 +490,24 @@ static int step_charge_soc_update(struct smb_charger *chg, int capacity)
 int smblib_set_usb_suspend(struct smb_charger *chg, bool suspend)
 {
 	int rc = 0;
+#ifdef CONFIG_HTC_BATT
+	u8 debug = 0;
+	int dbg_rc = 0;
+
+	smblib_err(chg, "DEBUG: suspend = %d\n", suspend);
+#endif //CONFIG_HTC_BATT
 
 	rc = smblib_masked_write(chg, USBIN_CMD_IL_REG, USBIN_SUSPEND_BIT,
 				 suspend ? USBIN_SUSPEND_BIT : 0);
 	if (rc < 0)
 		smblib_err(chg, "Couldn't write %s to USBIN_SUSPEND_BIT rc=%d\n",
 			suspend ? "suspend" : "resume", rc);
+
+#ifdef CONFIG_HTC_BATT
+	dbg_rc = smblib_read(chg, USBIN_CMD_IL_REG, &debug);
+	if (dbg_rc >= 0)
+		smblib_err(chg, "DEBUG: after suspend, 0x1340 = 0x%X\n", debug);
+#endif //CONFIG_HTC_BATT
 
 	return rc;
 }
@@ -524,24 +599,32 @@ static int smblib_set_usb_pd_allowed_voltage(struct smb_charger *chg,
  * HELPER FUNCTIONS *
  ********************/
 
-static void smblib_rerun_apsd(struct smb_charger *chg)
+static int try_rerun_apsd_for_hvdcp(struct smb_charger *chg)
 {
-	int rc;
+	const struct apsd_result *apsd_result;
 
-	smblib_dbg(chg, PR_MISC, "re-running APSD\n");
-	if (chg->wa_flags & QC_AUTH_INTERRUPT_WA_BIT) {
-		rc = smblib_masked_write(chg,
-				USBIN_SOURCE_CHANGE_INTRPT_ENB_REG,
-				AUTH_IRQ_EN_CFG_BIT, AUTH_IRQ_EN_CFG_BIT);
-		if (rc < 0)
-			smblib_err(chg, "Couldn't enable HVDCP auth IRQ rc=%d\n",
-									rc);
+	/*
+	 * PD_INACTIVE_VOTER on hvdcp_disable_votable indicates whether
+	 * apsd rerun was tried earlier
+	 */
+	if (get_client_vote(chg->hvdcp_disable_votable_indirect,
+						PD_INACTIVE_VOTER)) {
+		vote(chg->hvdcp_disable_votable_indirect,
+				PD_INACTIVE_VOTER, false, 0);
+		/* ensure hvdcp is enabled */
+		if (!get_effective_result(
+				chg->hvdcp_disable_votable_indirect)) {
+			apsd_result = smblib_get_apsd_result(chg);
+			if (apsd_result->bit & (QC_2P0_BIT | QC_3P0_BIT)) {
+				/* rerun APSD */
+				smblib_dbg(chg, PR_MISC, "rerun APSD\n");
+				smblib_masked_write(chg, CMD_APSD_REG,
+						APSD_RERUN_BIT,
+						APSD_RERUN_BIT);
+			}
+		}
 	}
-
-	rc = smblib_masked_write(chg, CMD_APSD_REG,
-				APSD_RERUN_BIT, APSD_RERUN_BIT);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't re-run APSD rc=%d\n", rc);
+	return 0;
 }
 
 static const struct apsd_result *smblib_update_usb_type(struct smb_charger *chg)
@@ -549,13 +632,12 @@ static const struct apsd_result *smblib_update_usb_type(struct smb_charger *chg)
 	const struct apsd_result *apsd_result = smblib_get_apsd_result(chg);
 
 	/* if PD is active, APSD is disabled so won't have a valid result */
-	if (chg->pd_active)
-		chg->real_charger_type = POWER_SUPPLY_TYPE_USB_PD;
-	else
-		chg->real_charger_type = apsd_result->pst;
+	if (chg->pd_active) {
+		chg->usb_psy_desc.type = POWER_SUPPLY_TYPE_USB_PD;
+		return apsd_result;
+	}
 
-	smblib_dbg(chg, PR_MISC, "APSD=%s PD=%d\n",
-					apsd_result->name, chg->pd_active);
+	chg->usb_psy_desc.type = apsd_result->pst;
 	return apsd_result;
 }
 
@@ -631,14 +713,10 @@ static void smblib_uusb_removal(struct smb_charger *chg)
 {
 	int rc;
 
-	cancel_delayed_work_sync(&chg->pl_enable_work);
-	vote(chg->pl_disable_votable, PL_DELAY_VOTER, true, 0);
-	vote(chg->awake_votable, PL_DELAY_VOTER, false, 0);
-
 	/* reset both usbin current and voltage votes */
 	vote(chg->pl_enable_votable_indirect, USBIN_I_VOTER, false, 0);
 	vote(chg->pl_enable_votable_indirect, USBIN_V_VOTER, false, 0);
-	vote(chg->usb_icl_votable, SW_QC3_VOTER, false, 0);
+	vote(chg->pl_disable_votable, PL_DELAY_HVDCP_VOTER, true, 0);
 
 	cancel_delayed_work_sync(&chg->hvdcp_detect_work);
 
@@ -663,7 +741,6 @@ static void smblib_uusb_removal(struct smb_charger *chg)
 	chg->voltage_max_uv = MICRO_5V;
 	chg->usb_icl_delta_ua = 0;
 	chg->pulse_cnt = 0;
-	chg->uusb_apsd_rerun_done = false;
 
 	/* clear USB ICL vote for USB_PSY_VOTER */
 	rc = vote(chg->usb_icl_votable, USB_PSY_VOTER, false, 0);
@@ -675,6 +752,28 @@ static void smblib_uusb_removal(struct smb_charger *chg)
 	if (rc < 0)
 		smblib_err(chg,
 			"Couldn't un-vote DCP from USB ICL rc=%d\n", rc);
+
+	/* clear USB ICL vote for PL_USBIN_USBIN_VOTER */
+	rc = vote(chg->usb_icl_votable, PL_USBIN_USBIN_VOTER, false, 0);
+	if (rc < 0)
+		smblib_err(chg,
+			"Couldn't un-vote PL_USBIN_USBIN from USB ICL rc=%d\n",
+			rc);
+}
+
+static bool smblib_sysok_reason_usbin(struct smb_charger *chg)
+{
+	int rc;
+	u8 stat;
+
+	rc = smblib_read(chg, SYSOK_REASON_STATUS_REG, &stat);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't get SYSOK_REASON_STATUS rc=%d\n", rc);
+		/* assuming 'not usbin' in case of read failure */
+		return false;
+	}
+
+	return stat & SYSOK_REASON_USBIN_BIT;
 }
 
 void smblib_suspend_on_debug_battery(struct smb_charger *chg)
@@ -700,6 +799,7 @@ void smblib_suspend_on_debug_battery(struct smb_charger *chg)
 
 int smblib_rerun_apsd_if_required(struct smb_charger *chg)
 {
+	const struct apsd_result *apsd_result;
 	union power_supply_propval val;
 	int rc;
 
@@ -712,30 +812,40 @@ int smblib_rerun_apsd_if_required(struct smb_charger *chg)
 	if (!val.intval)
 		return 0;
 
-	/* fetch the DPDM regulator */
-	if (!chg->dpdm_reg && of_get_property(chg->dev->of_node,
-						"dpdm-supply", NULL)) {
-		chg->dpdm_reg = devm_regulator_get(chg->dev, "dpdm");
-		if (IS_ERR(chg->dpdm_reg)) {
-			smblib_err(chg, "Couldn't get dpdm regulator rc=%ld\n",
-				PTR_ERR(chg->dpdm_reg));
-			chg->dpdm_reg = NULL;
+	apsd_result = smblib_get_apsd_result(chg);
+	if ((apsd_result->pst == POWER_SUPPLY_TYPE_UNKNOWN)
+		|| (apsd_result->pst == POWER_SUPPLY_TYPE_USB)) {
+		/* rerun APSD */
+		pr_info("Reruning APSD type = %s at bootup\n",
+				apsd_result->name);
+		rc = smblib_masked_write(chg, CMD_APSD_REG,
+					APSD_RERUN_BIT,
+					APSD_RERUN_BIT);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't rerun APSD rc = %d\n", rc);
+			return rc;
 		}
 	}
 
-	if (chg->dpdm_reg && !regulator_is_enabled(chg->dpdm_reg)) {
-		smblib_dbg(chg, PR_MISC, "enabling DPDM regulator\n");
-		rc = regulator_enable(chg->dpdm_reg);
-		if (rc < 0)
-			smblib_err(chg, "Couldn't enable dpdm regulator rc=%d\n",
-				rc);
-	}
+	return 0;
+}
 
-	chg->uusb_apsd_rerun_done = true;
-	smblib_rerun_apsd(chg);
+#ifdef CONFIG_HTC_BATT
+int smblib_rerun_apsd(struct smb_charger *chg)
+{
+	int rc;
+
+	pr_info("%s: RERUN-APSD\n", __func__);
+	rc = smblib_masked_write(chg, CMD_APSD_REG,
+				APSD_RERUN_BIT, APSD_RERUN_BIT);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't rerun APSD rc = %d\n", rc);
+		return rc;
+	}
 
 	return 0;
 }
+#endif //CONFIG_HTC_BATT
 
 static int smblib_get_pulse_cnt(struct smb_charger *chg, int *count)
 {
@@ -771,12 +881,182 @@ static int smblib_get_pulse_cnt(struct smb_charger *chg, int *count)
 	return 0;
 }
 
+/*********************
+ * VOTABLE CALLBACKS *
+ *********************/
+
+static int smblib_dc_suspend_vote_callback(struct votable *votable, void *data,
+			int suspend, const char *client)
+{
+	struct smb_charger *chg = data;
+
+	/* resume input if suspend is invalid */
+	if (suspend < 0)
+		suspend = 0;
+
+	return smblib_set_dc_suspend(chg, (bool)suspend);
+}
+
+#ifdef CONFIG_HTC_BATT
+static int smblib_usb_icl_set_high_current (struct smb_charger *chg)
+{
+	int rc = 0;
+
+	rc = smblib_masked_write(chg, USBIN_ICL_OPTIONS_REG,
+					USBIN_MODE_CHG_BIT,
+					USBIN_MODE_CHG_BIT);
+	if (rc < 0){
+		smblib_err(chg, "Couldn't set USB HC MODE rc=%d\n", rc);
+		return rc;
+	}
+
+	/* override APSD ICL limit */
+	rc = smblib_masked_write(chg, CMD_APSD_REG,
+					ICL_OVERRIDE_BIT,
+					ICL_OVERRIDE_BIT);
+	if (rc < 0){
+		smblib_err(chg, "Couldn't set ICL OVERRIDE rc=%d\n", rc);
+		return rc;
+	}
+
+	return rc;
+
+}
+#endif //CONFIG_HTC_BATT
+
 #define USBIN_25MA	25000
 #define USBIN_100MA	100000
 #define USBIN_150MA	150000
 #define USBIN_500MA	500000
 #define USBIN_900MA	900000
 
+#ifdef CONFIG_HTC_BATT
+#define TYPE_C_AICL_CHK_DELAY_MS	5000
+#define USBIN_1000MA	1000000
+#define USBIN_1500MA	1500000
+#define USBIN_2000MA	2000000
+#define USBIN_2500MA	2500000
+#define USBIN_3000MA	3000000
+#define USBIN_SUSPEND_MA	0
+static int smblib_usb_icl_vote_callback(struct votable *votable, void *data,
+			int icl_ua, const char *client)
+{
+	struct smb_charger *chg = data;
+	int rc = 0;
+	u8 icl_options = 0;
+	union power_supply_propval val = {0, };
+	int cc_type = POWER_SUPPLY_TYPEC_SOURCE_DEFAULT;
+
+	smblib_err(chg, "DEBUG: client = %s, icl_ua = %d\n", client, icl_ua);
+
+	/* suspend and return if 0mA is requested */
+	if (client && (icl_ua == USBIN_SUSPEND_MA)) {
+		smblib_err(chg, "Set ICL = 0, suspend input\n");
+		return smblib_set_usb_suspend(chg, true);
+	}
+
+	smblib_set_usb_suspend(chg, false);
+
+	rc = smblib_get_prop_typec_mode(chg, &val);
+	if (rc < 0)
+		smblib_err(chg, "Couldn't get prop typec mode rc=%d\n", rc);
+	else
+		cc_type = val.intval;
+
+	if ((chg->pd_active) || ((chg->cc_first_det_sts != CC_DET_DEFAULT) &&
+		(chg->usb_psy_desc.type != POWER_SUPPLY_TYPE_USB) && (chg->usb_psy_desc.type != POWER_SUPPLY_TYPE_USB_CDP))) {
+		// Set PD current for PD and TYPE-C charger in high/medium mode
+		if ((chg->pd_active) || (cc_type == POWER_SUPPLY_TYPEC_SOURCE_MEDIUM) ||
+				(cc_type == POWER_SUPPLY_TYPEC_SOURCE_HIGH)) {
+			rc = smblib_get_prop_pd_current_max(chg, &val);
+			if (rc < 0)
+				smblib_err(chg, "Couldn't get prop pd current max rc=%d\n", rc);
+			if (val.intval < USBIN_500MA)
+				icl_ua = USBIN_500MA;
+			else
+				icl_ua = val.intval;
+
+			rc = smblib_set_charge_param(chg, &chg->param.usb_icl, icl_ua);
+			if (rc < 0) {
+				smblib_err(chg, "Couldn't set HC ICL rc=%d\n", rc);
+				return rc;
+			}
+			rc = smblib_usb_icl_set_high_current(chg);
+			if (rc< 0)
+				return rc;
+
+			if (chg->pd_active)
+				smblib_dbg(chg, PR_INTERRUPT, "Set PD ICL = %d\n", icl_ua);
+			else {
+				smblib_dbg(chg, PR_INTERRUPT, "Set TYPEC ICL = %d\n", icl_ua);
+				if (delayed_work_pending(&chg->type_c_aicl_chk_work))
+					cancel_delayed_work_sync(&chg->type_c_aicl_chk_work);
+				schedule_delayed_work(&chg->type_c_aicl_chk_work, msecs_to_jiffies(TYPE_C_AICL_CHK_DELAY_MS));
+			}
+			return rc;
+		}
+	}
+
+	// Set ICL Option
+	switch (chg->usb_psy_desc.type) {
+	case POWER_SUPPLY_TYPE_USB_CDP:
+		if (icl_ua > USBIN_1500MA)
+			icl_ua = USBIN_1500MA;
+		else if (icl_ua < USBIN_25MA)
+			icl_ua = USBIN_500MA;
+		rc = smblib_set_charge_param(chg, &chg->param.usb_icl, icl_ua);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't set HC ICL rc=%d\n", rc);
+			return rc;
+		}
+		rc = smblib_usb_icl_set_high_current(chg);
+		if (rc< 0)
+			return rc;
+		break;
+	case POWER_SUPPLY_TYPE_USB:
+		if (icl_ua == USBIN_100MA)
+			icl_options = 0;
+		else if (icl_ua == USBIN_150MA)
+			icl_options = CFG_USB3P0_SEL_BIT;
+		else if (icl_ua == USBIN_500MA)
+			icl_options = USB51_MODE_BIT;
+		else if (icl_ua == USBIN_900MA)
+			icl_options = CFG_USB3P0_SEL_BIT | USB51_MODE_BIT;
+		else {
+			smblib_err(chg, "ICL %duA isn't supported for SDP, force 500mA\n", icl_ua);
+			icl_ua = USBIN_500MA;
+			icl_options = USB51_MODE_BIT;
+		}
+		rc = smblib_set_charge_param(chg, &chg->param.usb_icl, icl_ua);
+		rc = smblib_masked_write(chg, USBIN_ICL_OPTIONS_REG,
+					CFG_USB3P0_SEL_BIT | USB51_MODE_BIT | USBIN_MODE_CHG_BIT,
+					icl_options);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't set ICL opetions rc=%d\n", rc);
+			return rc;
+		}
+		break;
+	case POWER_SUPPLY_TYPE_USB_DCP:
+	case POWER_SUPPLY_TYPE_USB_HVDCP:
+	case POWER_SUPPLY_TYPE_USB_HVDCP_3:
+		rc = smblib_set_charge_param(chg, &chg->param.usb_icl, icl_ua);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't set HC ICL rc=%d\n", rc);
+			return rc;
+		}
+		rc = smblib_usb_icl_set_high_current(chg);
+		if (rc< 0)
+			return rc;
+		break;
+	default:
+		break;
+	}
+
+	smblib_dbg(chg, PR_INTERRUPT, "Set ICL = %d\n", icl_ua);
+
+	return rc;
+}
+#else
 static int set_sdp_current(struct smb_charger *chg, int icl_ua)
 {
 	int rc;
@@ -815,40 +1095,20 @@ static int set_sdp_current(struct smb_charger *chg, int icl_ua)
 	return rc;
 }
 
-static int get_sdp_current(struct smb_charger *chg, int *icl_ua)
+static int smblib_usb_icl_vote_callback(struct votable *votable, void *data,
+			int icl_ua, const char *client)
 {
-	int rc;
-	u8 icl_options;
-	bool usb3 = false;
-
-	rc = smblib_read(chg, USBIN_ICL_OPTIONS_REG, &icl_options);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't get ICL options rc=%d\n", rc);
-		return rc;
-	}
-
-	usb3 = (icl_options & CFG_USB3P0_SEL_BIT);
-
-	if (icl_options & USB51_MODE_BIT)
-		*icl_ua = usb3 ? USBIN_900MA : USBIN_500MA;
-	else
-		*icl_ua = usb3 ? USBIN_150MA : USBIN_100MA;
-
-	return rc;
-}
-
-int smblib_set_icl_current(struct smb_charger *chg, int icl_ua)
-{
+	struct smb_charger *chg = data;
 	int rc = 0;
 	bool override;
 	union power_supply_propval pval;
 
 	/* suspend and return if 25mA or less is requested */
-	if (icl_ua < USBIN_25MA)
+	if (client && (icl_ua < USBIN_25MA))
 		return smblib_set_usb_suspend(chg, true);
 
 	disable_irq_nosync(chg->irq_info[USBIN_ICL_CHANGE_IRQ].irq);
-	if (icl_ua == INT_MAX)
+	if (!client)
 		goto override_suspend_config;
 
 	rc = smblib_get_prop_typec_mode(chg, &pval);
@@ -859,15 +1119,15 @@ int smblib_set_icl_current(struct smb_charger *chg, int icl_ua)
 
 	/* configure current */
 	if (pval.intval == POWER_SUPPLY_TYPEC_SOURCE_DEFAULT
-		&& (chg->real_charger_type == POWER_SUPPLY_TYPE_USB)) {
+		&& (chg->usb_psy_desc.type == POWER_SUPPLY_TYPE_USB)) {
 		rc = set_sdp_current(chg, icl_ua);
 		if (rc < 0) {
 			smblib_err(chg, "Couldn't set SDP ICL rc=%d\n", rc);
 			goto enable_icl_changed_interrupt;
 		}
 	} else {
-		set_sdp_current(chg, 100000);
-		rc = smblib_set_charge_param(chg, &chg->param.usb_icl, icl_ua);
+		rc = smblib_set_charge_param(chg, &chg->param.usb_icl,
+				icl_ua - chg->icl_reduction_ua);
 		if (rc < 0) {
 			smblib_err(chg, "Couldn't set HC ICL rc=%d\n", rc);
 			goto enable_icl_changed_interrupt;
@@ -877,15 +1137,15 @@ int smblib_set_icl_current(struct smb_charger *chg, int icl_ua)
 override_suspend_config:
 	/* determine if override needs to be enforced */
 	override = true;
-	if (icl_ua == INT_MAX) {
+	if (client == NULL) {
 		/* remove override if no voters - hw defaults is desired */
 		override = false;
 	} else if (pval.intval == POWER_SUPPLY_TYPEC_SOURCE_DEFAULT) {
-		if (chg->real_charger_type == POWER_SUPPLY_TYPE_USB)
+		if (chg->usb_psy_desc.type == POWER_SUPPLY_TYPE_USB)
 			/* For std cable with type = SDP never override */
 			override = false;
-		else if (chg->real_charger_type == POWER_SUPPLY_TYPE_USB_CDP
-			&& icl_ua == 1500000)
+		else if (chg->usb_psy_desc.type == POWER_SUPPLY_TYPE_USB_CDP
+			&& icl_ua - chg->icl_reduction_ua == 1500000)
 			/*
 			 * For std cable with type = CDP override only if
 			 * current is not 1500mA
@@ -914,64 +1174,7 @@ enable_icl_changed_interrupt:
 	enable_irq(chg->irq_info[USBIN_ICL_CHANGE_IRQ].irq);
 	return rc;
 }
-
-int smblib_get_icl_current(struct smb_charger *chg, int *icl_ua)
-{
-	int rc = 0;
-	u8 load_cfg;
-	bool override;
-	union power_supply_propval pval;
-
-	rc = smblib_get_prop_typec_mode(chg, &pval);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't get typeC mode rc = %d\n", rc);
-		return rc;
-	}
-
-	if ((pval.intval == POWER_SUPPLY_TYPEC_SOURCE_DEFAULT
-		|| chg->micro_usb_mode)
-		&& (chg->usb_psy_desc.type == POWER_SUPPLY_TYPE_USB)) {
-		rc = get_sdp_current(chg, icl_ua);
-		if (rc < 0) {
-			smblib_err(chg, "Couldn't get SDP ICL rc=%d\n", rc);
-			return rc;
-		}
-	} else {
-		rc = smblib_read(chg, USBIN_LOAD_CFG_REG, &load_cfg);
-		if (rc < 0) {
-			smblib_err(chg, "Couldn't get load cfg rc=%d\n", rc);
-			return rc;
-		}
-		override = load_cfg & ICL_OVERRIDE_AFTER_APSD_BIT;
-		if (!override)
-			return INT_MAX;
-
-		/* override is set */
-		rc = smblib_get_charge_param(chg, &chg->param.usb_icl, icl_ua);
-		if (rc < 0) {
-			smblib_err(chg, "Couldn't get HC ICL rc=%d\n", rc);
-			return rc;
-		}
-	}
-
-	return 0;
-}
-
-/*********************
- * VOTABLE CALLBACKS *
- *********************/
-
-static int smblib_dc_suspend_vote_callback(struct votable *votable, void *data,
-			int suspend, const char *client)
-{
-	struct smb_charger *chg = data;
-
-	/* resume input if suspend is invalid */
-	if (suspend < 0)
-		suspend = 0;
-
-	return smblib_set_dc_suspend(chg, (bool)suspend);
-}
+#endif //CONFIG_HTC_BATT
 
 static int smblib_dc_icl_vote_callback(struct votable *votable, void *data,
 			int icl_ua, const char *client)
@@ -1049,6 +1252,16 @@ static int smblib_chg_disable_vote_callback(struct votable *votable, void *data,
 	return 0;
 }
 
+static int smblib_pl_enable_indirect_vote_callback(struct votable *votable,
+			void *data, int chg_enable, const char *client)
+{
+	struct smb_charger *chg = data;
+
+	vote(chg->pl_disable_votable, PL_INDIRECT_VOTER, !chg_enable, 0);
+
+	return 0;
+}
+
 static int smblib_hvdcp_enable_vote_callback(struct votable *votable,
 			void *data,
 			int hvdcp_enable, const char *client)
@@ -1056,7 +1269,6 @@ static int smblib_hvdcp_enable_vote_callback(struct votable *votable,
 	struct smb_charger *chg = data;
 	int rc;
 	u8 val = HVDCP_AUTH_ALG_EN_CFG_BIT | HVDCP_EN_BIT;
-	u8 stat;
 
 	/* vote to enable/disable HW autonomous INOV */
 	vote(chg->hvdcp_hw_inov_dis_votable, client, !hvdcp_enable, 0);
@@ -1077,16 +1289,6 @@ static int smblib_hvdcp_enable_vote_callback(struct votable *votable,
 			hvdcp_enable ? "enable" : "disable", rc);
 		return rc;
 	}
-
-	rc = smblib_read(chg, APSD_STATUS_REG, &stat);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't read APSD status rc=%d\n", rc);
-		return rc;
-	}
-
-	/* re-run APSD if HVDCP was detected */
-	if (stat & QC_CHARGER_BIT)
-		smblib_rerun_apsd(chg);
 
 	return 0;
 }
@@ -1110,6 +1312,16 @@ static int smblib_apsd_disable_vote_callback(struct votable *votable,
 	int rc;
 
 	if (apsd_disable) {
+		/* Don't run APSD on CC debounce when APSD is disabled */
+		rc = smblib_masked_write(chg, TYPE_C_CFG_REG,
+							APSD_START_ON_CC_BIT,
+							0);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't disable APSD_START_ON_CC rc=%d\n",
+									rc);
+			return rc;
+		}
+
 		rc = smblib_masked_write(chg, USBIN_OPTIONS_1_CFG_REG,
 							AUTO_SRC_DETECT_BIT,
 							0);
@@ -1125,7 +1337,23 @@ static int smblib_apsd_disable_vote_callback(struct votable *votable,
 			smblib_err(chg, "Couldn't enable APSD rc=%d\n", rc);
 			return rc;
 		}
+
+		rc = smblib_masked_write(chg, TYPE_C_CFG_REG,
+							APSD_START_ON_CC_BIT,
+							APSD_START_ON_CC_BIT);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't enable APSD_START_ON_CC rc=%d\n",
+									rc);
+			return rc;
+		}
 	}
+
+#ifdef CONFIG_HTC_BATT
+		if (!apsd_disable){
+			smblib_dbg(chg, PR_INTERRUPT, "rerun APSD for apsd re-enable\n");
+			smblib_rerun_apsd(chg);
+		}
+#endif //CONFIG_HTC_BATT
 
 	return 0;
 }
@@ -1161,6 +1389,70 @@ static int smblib_hvdcp_hw_inov_dis_vote_callback(struct votable *votable,
 	return rc;
 }
 
+/**********************
+ * TPS61099 REGULATOR *
+ * ********************/
+
+int smblib_set_poweroff_sel(struct smb_charger *chg,
+		const union power_supply_propval *val)
+{
+	int rc = 0;
+
+	mutex_lock(&chg->otg_oc_lock);
+
+	if (val->intval == 0 && regulator_is_enabled(chg->ext_power)) {
+		rc = regulator_disable(chg->ext_power);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't disable TPS61099 power rc=%d\n", rc);
+			goto unlock;
+		}
+	} else if (val->intval == 1) {
+		rc = smblib_vbus_disable(chg);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't disable PMI8998 vbus power rc=%d\n", rc);
+			goto unlock;
+		}
+	}
+
+unlock:
+	mutex_unlock(&chg->otg_oc_lock);
+	return rc;
+}
+
+int smblib_get_ext_otg_control(struct smb_charger *chg,
+		union power_supply_propval *val)
+{
+	mutex_lock(&chg->otg_oc_lock);
+	val->intval = regulator_is_enabled(chg->ext_power);
+	mutex_unlock(&chg->otg_oc_lock);
+	return 0;
+}
+
+int smblib_set_ext_otg_control(struct smb_charger *chg,
+		const union power_supply_propval *val)
+{
+	int rc = 0;
+
+	mutex_lock(&chg->otg_oc_lock);
+	if (val->intval == 0 && regulator_is_enabled(chg->ext_power)) {
+		rc = regulator_disable(chg->ext_power);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't disable TPS61099 power rc=%d\n", rc);
+			goto unlock;
+		}
+	} else if (val->intval == 1 && !regulator_is_enabled(chg->ext_power)){
+		rc = regulator_enable(chg->ext_power);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't enable TPS61099 power rc=%d\n", rc);
+			goto unlock;
+		}
+	}
+
+unlock:
+	mutex_unlock(&chg->otg_oc_lock);
+	return rc;
+}
+
 static int smblib_usb_irq_enable_vote_callback(struct votable *votable,
 				void *data, int enable, const char *client)
 {
@@ -1172,27 +1464,14 @@ static int smblib_usb_irq_enable_vote_callback(struct votable *votable,
 
 	if (enable) {
 		enable_irq(chg->irq_info[INPUT_CURRENT_LIMIT_IRQ].irq);
+#ifdef CONFIG_HTC_BATT /* Not enable HDC irq to fix irq storm with QC3 */
+		if (!is_gc_charger_vote_usb_irq_enable)
+#endif
 		enable_irq(chg->irq_info[HIGH_DUTY_CYCLE_IRQ].irq);
 	} else {
 		disable_irq(chg->irq_info[INPUT_CURRENT_LIMIT_IRQ].irq);
 		disable_irq(chg->irq_info[HIGH_DUTY_CYCLE_IRQ].irq);
 	}
-
-	return 0;
-}
-
-static int smblib_typec_irq_disable_vote_callback(struct votable *votable,
-				void *data, int disable, const char *client)
-{
-	struct smb_charger *chg = data;
-
-	if (!chg->irq_info[TYPE_C_CHANGE_IRQ].irq)
-		return 0;
-
-	if (disable)
-		disable_irq_nosync(chg->irq_info[TYPE_C_CHANGE_IRQ].irq);
-	else
-		enable_irq(chg->irq_info[TYPE_C_CHANGE_IRQ].irq);
 
 	return 0;
 }
@@ -1205,20 +1484,55 @@ static int smblib_typec_irq_disable_vote_callback(struct votable *votable,
 static int _smblib_vconn_regulator_enable(struct regulator_dev *rdev)
 {
 	struct smb_charger *chg = rdev_get_drvdata(rdev);
-	int rc = 0;
-	u8 val;
+	u8 otg_stat, stat4;
+	int rc = 0, i;
+
+	if (!chg->external_vconn) {
+		/*
+		 * Hardware based OTG soft start should complete within 1ms, so
+		 * wait for 2ms in the worst case.
+		 */
+		for (i = 0; i < MAX_OTG_SS_TRIES; ++i) {
+			usleep_range(1000, 1100);
+			rc = smblib_read(chg, OTG_STATUS_REG, &otg_stat);
+			if (rc < 0) {
+				smblib_err(chg, "Couldn't read OTG status rc=%d\n",
+									rc);
+				return rc;
+			}
+
+			if (otg_stat & BOOST_SOFTSTART_DONE_BIT)
+				break;
+		}
+
+		if (!(otg_stat & BOOST_SOFTSTART_DONE_BIT)) {
+			smblib_err(chg, "Couldn't enable VCONN; OTG soft start failed\n");
+			return -EAGAIN;
+		}
+	}
 
 	/*
-	 * When enabling VCONN using the command register the CC pin must be
-	 * selected. VCONN should be supplied to the inactive CC pin hence using
-	 * the opposite of the CC_ORIENTATION_BIT.
+	 * VCONN_EN_ORIENTATION is overloaded with overriding the CC pin used
+	 * for Vconn, and it should be set with reverse polarity of CC_OUT.
 	 */
+	rc = smblib_read(chg, TYPE_C_STATUS_4_REG, &stat4);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_4 rc=%d\n", rc);
+		return rc;
+	}
+
 	smblib_dbg(chg, PR_OTG, "enabling VCONN\n");
-	val = chg->typec_status[3] &
-			CC_ORIENTATION_BIT ? 0 : VCONN_EN_ORIENTATION_BIT;
+	if (chg->vconn_sel == 1 ) {
+		stat4 = 0;
+	} else if (chg->vconn_sel == 2) {
+		stat4 = VCONN_EN_ORIENTATION_BIT;
+	} else if (chg->vconn_sel == 0) {
+		stat4 = stat4 & CC_ORIENTATION_BIT ? 0 : VCONN_EN_ORIENTATION_BIT;
+	}
+
 	rc = smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
 				 VCONN_EN_VALUE_BIT | VCONN_EN_ORIENTATION_BIT,
-				 VCONN_EN_VALUE_BIT | val);
+				 VCONN_EN_VALUE_BIT | stat4);
 	if (rc < 0) {
 		smblib_err(chg, "Couldn't enable vconn setting rc=%d\n", rc);
 		return rc;
@@ -1232,7 +1546,7 @@ int smblib_vconn_regulator_enable(struct regulator_dev *rdev)
 	struct smb_charger *chg = rdev_get_drvdata(rdev);
 	int rc = 0;
 
-	mutex_lock(&chg->vconn_oc_lock);
+	mutex_lock(&chg->otg_oc_lock);
 	if (chg->vconn_en)
 		goto unlock;
 
@@ -1241,7 +1555,7 @@ int smblib_vconn_regulator_enable(struct regulator_dev *rdev)
 		chg->vconn_en = true;
 
 unlock:
-	mutex_unlock(&chg->vconn_oc_lock);
+	mutex_unlock(&chg->otg_oc_lock);
 	return rc;
 }
 
@@ -1264,7 +1578,7 @@ int smblib_vconn_regulator_disable(struct regulator_dev *rdev)
 	struct smb_charger *chg = rdev_get_drvdata(rdev);
 	int rc = 0;
 
-	mutex_lock(&chg->vconn_oc_lock);
+	mutex_lock(&chg->otg_oc_lock);
 	if (!chg->vconn_en)
 		goto unlock;
 
@@ -1273,7 +1587,7 @@ int smblib_vconn_regulator_disable(struct regulator_dev *rdev)
 		chg->vconn_en = false;
 
 unlock:
-	mutex_unlock(&chg->vconn_oc_lock);
+	mutex_unlock(&chg->otg_oc_lock);
 	return rc;
 }
 
@@ -1282,16 +1596,16 @@ int smblib_vconn_regulator_is_enabled(struct regulator_dev *rdev)
 	struct smb_charger *chg = rdev_get_drvdata(rdev);
 	int ret;
 
-	mutex_lock(&chg->vconn_oc_lock);
+	mutex_lock(&chg->otg_oc_lock);
 	ret = chg->vconn_en;
-	mutex_unlock(&chg->vconn_oc_lock);
+	mutex_unlock(&chg->otg_oc_lock);
 	return ret;
 }
 
 /*****************
  * OTG REGULATOR *
  *****************/
-#define MAX_RETRY		15
+#define MAX_RETRY		35
 #define MIN_DELAY_US		2000
 #define MAX_DELAY_US		9000
 static int _smblib_vbus_regulator_enable(struct regulator_dev *rdev)
@@ -1365,14 +1679,6 @@ int smblib_vbus_regulator_enable(struct regulator_dev *rdev)
 	if (chg->otg_en)
 		goto unlock;
 
-	if (!chg->usb_icl_votable) {
-		chg->usb_icl_votable = find_votable("USB_ICL");
-
-		if (!chg->usb_icl_votable)
-			return -EINVAL;
-	}
-	vote(chg->usb_icl_votable, USBIN_USBIN_BOOST_VOTER, true, 0);
-
 	rc = _smblib_vbus_regulator_enable(rdev);
 	if (rc >= 0)
 		chg->otg_en = true;
@@ -1386,6 +1692,13 @@ static int _smblib_vbus_regulator_disable(struct regulator_dev *rdev)
 {
 	struct smb_charger *chg = rdev_get_drvdata(rdev);
 	int rc;
+
+	if (!chg->external_vconn && chg->vconn_en) {
+		smblib_dbg(chg, PR_OTG, "Killing VCONN before disabling OTG\n");
+		rc = _smblib_vconn_regulator_disable(rdev);
+		if (rc < 0)
+			smblib_err(chg, "Couldn't disable VCONN rc=%d\n", rc);
+	}
 
 	if (chg->wa_flags & OTG_WA) {
 		/* set OTG current limit to minimum value */
@@ -1416,6 +1729,19 @@ static int _smblib_vbus_regulator_disable(struct regulator_dev *rdev)
 	return 0;
 }
 
+int smblib_vbus_disable(struct smb_charger *chg)
+{
+	int rc = 0;
+
+	if (chg->otg_en) {
+		rc = _smblib_vbus_regulator_disable(chg->vbus_vreg->rdev);
+		if (rc >= 0)
+			chg->otg_en = false;
+	}
+
+	return rc;
+}
+
 int smblib_vbus_regulator_disable(struct regulator_dev *rdev)
 {
 	struct smb_charger *chg = rdev_get_drvdata(rdev);
@@ -1425,12 +1751,8 @@ int smblib_vbus_regulator_disable(struct regulator_dev *rdev)
 	if (!chg->otg_en)
 		goto unlock;
 
-	rc = _smblib_vbus_regulator_disable(rdev);
-	if (rc >= 0)
-		chg->otg_en = false;
+	rc = smblib_vbus_disable(chg);
 
-	if (chg->usb_icl_votable)
-		vote(chg->usb_icl_votable, USBIN_USBIN_BOOST_VOTER, false, 0);
 unlock:
 	mutex_unlock(&chg->otg_oc_lock);
 	return rc;
@@ -1450,6 +1772,58 @@ int smblib_vbus_regulator_is_enabled(struct regulator_dev *rdev)
 /********************
  * BATT PSY GETTERS *
  ********************/
+#ifdef CONFIG_HTC_BATT
+int smblib_get_usb_in_isen_adc(struct smb_charger *chg, struct qpnp_vadc_chip *vadc_usb_in_isen,
+					unsigned int vadc_usb_in_isen_channel ,union power_supply_propval *val)
+{
+	int rc = 0;
+	struct qpnp_vadc_result results;
+	val->intval = -1;
+
+	if(vadc_usb_in_isen_channel == 0)
+		return -EINVAL;
+
+	if (IS_ERR(vadc_usb_in_isen)) {
+		vadc_usb_in_isen = qpnp_get_vadc(chg->dev, "usb_in_isen");
+	}
+
+	if (IS_ERR(vadc_usb_in_isen)) {
+		return -EINVAL;
+	}
+
+	if(vadc_usb_in_isen) {
+		rc = qpnp_vadc_read(vadc_usb_in_isen, vadc_usb_in_isen_channel, &results);
+		if (rc) {
+			return -EINVAL;
+		} else {
+			val->intval =  (int)results.physical;
+		}
+	}
+	return rc;
+}
+
+int smblib_get_usb_in_isen_current_ma(struct smb_charger *chg, unsigned int iusb_rsen,
+						unsigned int iusb_multiplier, struct qpnp_vadc_chip *vadc_usb_in_isen,
+                                        unsigned int vadc_usb_in_isen_channel, union power_supply_propval *val)
+{
+	int vsen = 0;
+	union power_supply_propval ret = {0, };
+	val->intval = -100;
+	if (iusb_rsen)
+	{
+		smblib_get_usb_in_isen_adc(chg, vadc_usb_in_isen, vadc_usb_in_isen_channel, &ret);
+		vsen = ret.intval;
+		if (vsen >= 0) {
+			val->intval = (vsen * iusb_multiplier / iusb_rsen) / 1000;
+		} else {
+			val->intval = -1;
+		}
+	} else {
+		val->intval = -1;
+	}
+	return 0;
+}
+#endif
 
 int smblib_get_prop_input_suspend(struct smb_charger *chg,
 				  union power_supply_propval *val)
@@ -1491,6 +1865,11 @@ int smblib_get_prop_batt_capacity(struct smb_charger *chg,
 	if (chg->bms_psy)
 		rc = power_supply_get_property(chg->bms_psy,
 				POWER_SUPPLY_PROP_CAPACITY, val);
+#ifdef CONFIG_HTC_BATT
+			htc_battery_info_update(POWER_SUPPLY_PROP_CAPACITY, val->intval);
+			val->intval = htc_battery_level_adjust();
+#endif //CONFIG_HTC_BATT
+
 	return rc;
 }
 
@@ -1501,6 +1880,9 @@ int smblib_get_prop_batt_status(struct smb_charger *chg,
 	bool usb_online, dc_online;
 	u8 stat;
 	int rc;
+#ifdef CONFIG_HTC_BATT
+	int level = htc_battery_level_adjust();
+#endif //CONFIG_HTC_BATT
 
 	rc = smblib_get_prop_usb_online(chg, &pval);
 	if (rc < 0) {
@@ -1545,34 +1927,47 @@ int smblib_get_prop_batt_status(struct smb_charger *chg,
 	case FAST_CHARGE:
 	case FULLON_CHARGE:
 	case TAPER_CHARGE:
+#ifdef CONFIG_HTC_BATT
+		if (level == 100)
+			val->intval = POWER_SUPPLY_STATUS_FULL;
+		else
+			val->intval = POWER_SUPPLY_STATUS_CHARGING;
+#else
 		val->intval = POWER_SUPPLY_STATUS_CHARGING;
+#endif //CONFIG_HTC_BATT
 		break;
 	case TERMINATE_CHARGE:
 	case INHIBIT_CHARGE:
+#ifdef CONFIG_HTC_BATT
+		if (level == 100)
+			val->intval = POWER_SUPPLY_STATUS_FULL;
+		else
+			val->intval = POWER_SUPPLY_STATUS_CHARGING;
+#else
 		val->intval = POWER_SUPPLY_STATUS_FULL;
+#endif //CONFIG_HTC_BATT
 		break;
 	case DISABLE_CHARGE:
+#ifdef CONFIG_HTC_BATT
+		if (htc_battery_get_discharging_reason())
+			val->intval = POWER_SUPPLY_STATUS_CHARGING;
+		else
+			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+#else
 		val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
+#endif //CONFIG_HTC_BATT
 		break;
 	default:
 		val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
 		break;
 	}
 
-	if (val->intval != POWER_SUPPLY_STATUS_CHARGING)
-		return 0;
-
-	rc = smblib_read(chg, BATTERY_CHARGER_STATUS_7_REG, &stat);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't read BATTERY_CHARGER_STATUS_2 rc=%d\n",
-				rc);
-			return rc;
-		}
-
-	stat &= ENABLE_TRICKLE_BIT | ENABLE_PRE_CHARGING_BIT |
-		 ENABLE_FAST_CHARGING_BIT | ENABLE_FULLON_MODE_BIT;
-	if (!stat)
-		val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
+#ifdef CONFIG_HTC_BATT
+	if(get_client_vote_locked(chg->apsd_disable_votable, PD_HARD_RESET_VOTER) && usb_online){
+		smblib_err(chg, "APSD_DISABLED, force report charging\n");
+		val->intval = POWER_SUPPLY_STATUS_CHARGING;
+	}
+#endif // CONFIG_HTC_BATT
 
 	return 0;
 }
@@ -1614,7 +2009,6 @@ int smblib_get_prop_batt_health(struct smb_charger *chg,
 {
 	union power_supply_propval pval;
 	int rc;
-	int effective_fv_uv;
 	u8 stat;
 
 	rc = smblib_read(chg, BATTERY_CHARGER_STATUS_2_REG, &stat);
@@ -1633,11 +2027,10 @@ int smblib_get_prop_batt_health(struct smb_charger *chg,
 			 * If Vbatt is within 40mV above Vfloat, then don't
 			 * treat it as overvoltage.
 			 */
-			effective_fv_uv = get_effective_result(chg->fv_votable);
-			if (pval.intval >= effective_fv_uv + 40000) {
+			if (pval.intval >=
+				get_effective_result(chg->fv_votable) + 40000) {
 				val->intval = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
-				smblib_err(chg, "battery over-voltage vbat_fg = %duV, fv = %duV\n",
-						pval.intval, effective_fv_uv);
+				smblib_err(chg, "battery over-voltage\n");
 				goto done;
 			}
 		}
@@ -1670,11 +2063,6 @@ int smblib_get_prop_input_current_limited(struct smb_charger *chg,
 {
 	u8 stat;
 	int rc;
-
-	if (chg->fake_input_current_limited >= 0) {
-		val->intval = chg->fake_input_current_limited;
-		return 0;
-	}
 
 	rc = smblib_read(chg, AICL_STATUS_REG, &stat);
 	if (rc < 0) {
@@ -1721,6 +2109,14 @@ int smblib_get_prop_batt_temp(struct smb_charger *chg,
 
 	rc = power_supply_get_property(chg->bms_psy,
 				       POWER_SUPPLY_PROP_TEMP, val);
+
+#ifdef CONFIG_HTC_BATT
+	if (get_kernel_flag() & KERNEL_FLAG_TEST_PWR_SUPPLY)
+		val->intval = POWER_MONITOR_BATT_TEMP;
+	if (val->intval > 650 && (get_kernel_flag() & KERNEL_FLAG_KEEP_CHARG_ON))
+		val->intval = 650;
+#endif //CONFIG_HTC_BATT
+
 	return rc;
 }
 
@@ -1766,22 +2162,28 @@ int smblib_get_prop_batt_charge_done(struct smb_charger *chg,
 	return 0;
 }
 
-int smblib_get_prop_charge_qnovo_enable(struct smb_charger *chg,
-				  union power_supply_propval *val)
+#ifdef CONFIG_HTC_BATT
+int smblib_get_ext_otg_chg_control(struct smb_charger *chg,
+					union power_supply_propval *val)
 {
-	int rc;
-	u8 stat;
+	int rc = 0;
+	u8 stat = 0;
 
-	rc = smblib_read(chg, QNOVO_PT_ENABLE_CMD_REG, &stat);
+	rc = smblib_read(chg, USBIN_ADAPTER_ALLOW_CFG_REG, &stat);
 	if (rc < 0) {
-		smblib_err(chg, "Couldn't read QNOVO_PT_ENABLE_CMD rc=%d\n",
+		smblib_err(chg, "Couldn't read USBIN_ADAPTER_ALLOW_CFG_REG rc=%d\n",
 			rc);
 		return rc;
 	}
 
-	val->intval = (bool)(stat & QNOVO_PT_ENABLE_CMD_BIT);
+	pr_info("USBIN_ADAPTER_ALLOW_CFG_REG = 0x%02x\n",stat);
+
+	stat = stat & USBIN_ADAPTER_ALLOW_MASK;
+	val->intval = !(stat == USBIN_ADAPTER_ALLOW_12V);
+
 	return 0;
 }
+#endif // CONFIG_HTC_BATT
 
 /***********************
  * BATTERY PSY SETTERS *
@@ -1834,10 +2236,6 @@ int smblib_set_prop_system_temp_level(struct smb_charger *chg,
 		return -EINVAL;
 
 	chg->system_temp_level = val->intval;
-	/* disable parallel charge in case of system temp level */
-	vote(chg->pl_disable_votable, THERMAL_DAEMON_VOTER,
-			chg->system_temp_level ? true : false, 0);
-
 	if (chg->system_temp_level == chg->thermal_levels)
 		return vote(chg->chg_disable_votable,
 			THERMAL_DAEMON_VOTER, true, 0);
@@ -1848,29 +2246,6 @@ int smblib_set_prop_system_temp_level(struct smb_charger *chg,
 
 	vote(chg->fcc_votable, THERMAL_DAEMON_VOTER, true,
 			chg->thermal_mitigation[chg->system_temp_level]);
-	return 0;
-}
-
-int smblib_set_prop_charge_qnovo_enable(struct smb_charger *chg,
-				  const union power_supply_propval *val)
-{
-	int rc = 0;
-
-	rc = smblib_masked_write(chg, QNOVO_PT_ENABLE_CMD_REG,
-			QNOVO_PT_ENABLE_CMD_BIT,
-			val->intval ? QNOVO_PT_ENABLE_CMD_BIT : 0);
-	if (rc < 0) {
-		dev_err(chg->dev, "Couldn't enable qnovo rc=%d\n", rc);
-		return rc;
-	}
-
-	return rc;
-}
-
-int smblib_set_prop_input_current_limited(struct smb_charger *chg,
-				const union power_supply_propval *val)
-{
-	chg->fake_input_current_limited = val->intval;
 	return 0;
 }
 
@@ -1891,17 +2266,37 @@ int smblib_rerun_aicl(struct smb_charger *chg)
 		return rc;
 
 	smblib_dbg(chg, PR_MISC, "re-running AICL\n");
-	rc = smblib_get_charge_param(chg, &chg->param.icl_stat,
-			&settled_icl_ua);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't get settled ICL rc=%d\n", rc);
-		return rc;
-	}
+	switch (chg->smb_version) {
+	case PMI8998_SUBTYPE:
+		rc = smblib_get_charge_param(chg, &chg->param.icl_stat,
+							&settled_icl_ua);
+		if (rc < 0) {
+			smblib_err(chg, "Couldn't get settled ICL rc=%d\n", rc);
+			return rc;
+		}
 
-	vote(chg->usb_icl_votable, AICL_RERUN_VOTER, true,
-			max(settled_icl_ua - chg->param.usb_icl.step_u,
+		vote(chg->usb_icl_votable, AICL_RERUN_VOTER, true,
+				max(settled_icl_ua - chg->param.usb_icl.step_u,
 				chg->param.usb_icl.step_u));
-	vote(chg->usb_icl_votable, AICL_RERUN_VOTER, false, 0);
+		vote(chg->usb_icl_votable, AICL_RERUN_VOTER, false, 0);
+		break;
+	case PM660_SUBTYPE:
+		/*
+		 * Use restart_AICL instead of trigger_AICL as it runs the
+		 * complete AICL instead of starting from the last settled
+		 * value.
+		 */
+		rc = smblib_masked_write(chg, CMD_HVDCP_2_REG,
+					RESTART_AICL_BIT, RESTART_AICL_BIT);
+		if (rc < 0)
+			smblib_err(chg, "Couldn't write to CMD_HVDCP_2_REG rc=%d\n",
+									rc);
+		break;
+	default:
+		smblib_dbg(chg, PR_PARALLEL, "unknown SMB chip %d\n",
+				chg->smb_version);
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -1937,7 +2332,6 @@ static int smblib_dm_pulse(struct smb_charger *chg)
 int smblib_dp_dm(struct smb_charger *chg, int val)
 {
 	int target_icl_ua, rc = 0;
-	union power_supply_propval pval;
 
 	switch (val) {
 	case POWER_SUPPLY_DP_DM_DP_PULSE:
@@ -1955,35 +2349,10 @@ int smblib_dp_dm(struct smb_charger *chg, int val)
 				rc, chg->pulse_cnt);
 		break;
 	case POWER_SUPPLY_DP_DM_ICL_DOWN:
+		chg->usb_icl_delta_ua -= 100000;
 		target_icl_ua = get_effective_result(chg->usb_icl_votable);
-		if (target_icl_ua < 0) {
-			/* no client vote, get the ICL from charger */
-			rc = power_supply_get_property(chg->usb_psy,
-					POWER_SUPPLY_PROP_HW_CURRENT_MAX,
-					&pval);
-			if (rc < 0) {
-				smblib_err(chg,
-					"Couldn't get max current rc=%d\n",
-					rc);
-				return rc;
-			}
-			target_icl_ua = pval.intval;
-		}
-
-		/*
-		 * Check if any other voter voted on USB_ICL in case of
-		 * voter other than SW_QC3_VOTER reset and restart reduction
-		 * again.
-		 */
-		if (target_icl_ua != get_client_vote(chg->usb_icl_votable,
-							SW_QC3_VOTER))
-			chg->usb_icl_delta_ua = 0;
-
-		chg->usb_icl_delta_ua += 100000;
 		vote(chg->usb_icl_votable, SW_QC3_VOTER, true,
-						target_icl_ua - 100000);
-		smblib_dbg(chg, PR_PARALLEL, "ICL DOWN ICL=%d reduction=%d\n",
-				target_icl_ua, chg->usb_icl_delta_ua);
+				target_icl_ua + chg->usb_icl_delta_ua);
 		break;
 	case POWER_SUPPLY_DP_DM_ICL_UP:
 	default:
@@ -1992,6 +2361,25 @@ int smblib_dp_dm(struct smb_charger *chg, int val)
 
 	return rc;
 }
+
+#ifdef CONFIG_HTC_BATT
+int smblib_set_ext_otg_chg_control(struct smb_charger *chg,
+				const union power_supply_propval *val)
+{
+	int rc = 0;
+
+	rc = smblib_masked_write(chg, USBIN_ADAPTER_ALLOW_CFG_REG, USBIN_ADAPTER_ALLOW_MASK,
+			val->intval ? USBIN_ADAPTER_ALLOW_5V_TO_9V : USBIN_ADAPTER_ALLOW_12V);
+	if (rc < 0)
+		smblib_err(chg, "Couldn't write %s to USBIN_ADAPTER_ALLOW_MASK rc=%d\n",
+			(bool)val->intval ? "5V_TO_9V" : "ALLOW_12V", rc);
+
+
+	pr_info("[OTG] PMI8998 charger is %s\n", (bool)val->intval ? "enable" : "disable");
+
+	return rc;
+}
+#endif // CONFIG_HTC_BATT
 
 /*******************
  * DC PSY GETTERS *
@@ -2085,7 +2473,7 @@ int smblib_get_prop_usb_online(struct smb_charger *chg,
 	int rc = 0;
 	u8 stat;
 
-	if (get_client_vote_locked(chg->usb_icl_votable, USER_VOTER) == 0) {
+	if (get_client_vote(chg->usb_icl_votable, USER_VOTER) == 0) {
 		val->intval = false;
 		return rc;
 	}
@@ -2107,11 +2495,14 @@ int smblib_get_prop_usb_online(struct smb_charger *chg,
 int smblib_get_prop_usb_voltage_now(struct smb_charger *chg,
 				    union power_supply_propval *val)
 {
+#ifdef CONFIG_HTC_BATT
+#else
 	int rc = 0;
 
 	rc = smblib_get_prop_usb_present(chg, val);
 	if (rc < 0 || !val->intval)
 		return rc;
+#endif //CONFIG_HTC_BATT
 
 	if (!chg->iio.usbin_v_chan ||
 		PTR_ERR(chg->iio.usbin_v_chan) == -EPROBE_DEFER)
@@ -2157,10 +2548,58 @@ int smblib_get_prop_usb_current_now(struct smb_charger *chg,
 	return iio_read_channel_processed(chg->iio.usbin_i_chan, &val->intval);
 }
 
+int smblib_get_prop_otg_state(struct smb_charger *chg,
+				union power_supply_propval *val)
+{
+	int rc = 0;
+	u8 stat;
+	u8 stat2;
+
+	rc = smblib_read(chg, CMD_OTG_REG, &stat);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read CMD_OTG_REG rc=%d\n", rc);
+		return rc;
+	}
+
+	rc = smblib_read(chg, OTG_STATUS_REG, &stat2);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read OTG_STATUS_REG rc=%d\n", rc);
+		return rc;
+	}
+	if ((stat2 & BOOST_SOFTSTART_DONE_BIT) && stat)
+		val->intval = 1;
+	else
+		val->intval = 0;
+
+	return rc;
+}
+
+int smblib_set_prop_otg_state(struct smb_charger *chg,
+				const union power_supply_propval *val)
+{
+	int rc = 0;
+
+	mutex_lock(&chg->otg_oc_lock);
+
+	rc = _smblib_vbus_regulator_disable(chg->vbus_vreg->rdev);
+	if (rc >= 0)
+		chg->otg_en = false;
+
+	mutex_unlock(&chg->otg_oc_lock);
+	return rc;
+}
+
 int smblib_get_prop_charger_temp(struct smb_charger *chg,
 				 union power_supply_propval *val)
 {
 	int rc;
+
+#ifdef CONFIG_HTC_BATT
+        rc = smblib_get_prop_usb_present(chg, val);
+        if (rc < 0 || !val->intval)
+                return rc;
+#endif //CONFIG_HTC_BATT
+
 
 	if (!chg->iio.temp_chan ||
 		PTR_ERR(chg->iio.temp_chan) == -EPROBE_DEFER)
@@ -2194,13 +2633,23 @@ int smblib_get_prop_charger_temp_max(struct smb_charger *chg,
 int smblib_get_prop_typec_cc_orientation(struct smb_charger *chg,
 					 union power_supply_propval *val)
 {
-	if (chg->typec_status[3] & CC_ATTACHED_BIT)
-		val->intval =
-			(bool)(chg->typec_status[3] & CC_ORIENTATION_BIT) + 1;
+	int rc = 0;
+	u8 stat;
+
+	rc = smblib_read(chg, TYPE_C_STATUS_4_REG, &stat);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_4 rc=%d\n", rc);
+		return rc;
+	}
+	smblib_dbg(chg, PR_REGISTER, "TYPE_C_STATUS_4 = 0x%02x\n",
+		   stat);
+
+	if (stat & CC_ATTACHED_BIT)
+		val->intval = (bool)(stat & CC_ORIENTATION_BIT) + 1;
 	else
 		val->intval = 0;
 
-	return 0;
+	return rc;
 }
 
 static const char * const smblib_typec_mode_name[] = {
@@ -2218,7 +2667,17 @@ static const char * const smblib_typec_mode_name[] = {
 
 static int smblib_get_prop_ufp_mode(struct smb_charger *chg)
 {
-	switch (chg->typec_status[0]) {
+	int rc;
+	u8 stat;
+
+	rc = smblib_read(chg, TYPE_C_STATUS_1_REG, &stat);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_1 rc=%d\n", rc);
+		return POWER_SUPPLY_TYPEC_NONE;
+	}
+	smblib_dbg(chg, PR_REGISTER, "TYPE_C_STATUS_1 = 0x%02x\n", stat);
+
+	switch (stat) {
 	case 0:
 		return POWER_SUPPLY_TYPEC_NONE;
 	case UFP_TYPEC_RDSTD_BIT:
@@ -2236,7 +2695,17 @@ static int smblib_get_prop_ufp_mode(struct smb_charger *chg)
 
 static int smblib_get_prop_dfp_mode(struct smb_charger *chg)
 {
-	switch (chg->typec_status[1] & DFP_TYPEC_MASK) {
+	int rc;
+	u8 stat;
+
+	rc = smblib_read(chg, TYPE_C_STATUS_2_REG, &stat);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_2 rc=%d\n", rc);
+		return POWER_SUPPLY_TYPEC_NONE;
+	}
+	smblib_dbg(chg, PR_REGISTER, "TYPE_C_STATUS_2 = 0x%02x\n", stat);
+
+	switch (stat & DFP_TYPEC_MASK) {
 	case DFP_RA_RA_BIT:
 		return POWER_SUPPLY_TYPEC_SINK_AUDIO_ADAPTER;
 	case DFP_RD_RD_BIT:
@@ -2257,17 +2726,28 @@ static int smblib_get_prop_dfp_mode(struct smb_charger *chg)
 int smblib_get_prop_typec_mode(struct smb_charger *chg,
 			       union power_supply_propval *val)
 {
-	if (!(chg->typec_status[3] & TYPEC_DEBOUNCE_DONE_STATUS_BIT)) {
+	int rc;
+	u8 stat;
+
+	rc = smblib_read(chg, TYPE_C_STATUS_4_REG, &stat);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_4 rc=%d\n", rc);
 		val->intval = POWER_SUPPLY_TYPEC_NONE;
-		return 0;
+		return rc;
+	}
+	smblib_dbg(chg, PR_REGISTER, "TYPE_C_STATUS_4 = 0x%02x\n", stat);
+
+	if (!(stat & TYPEC_DEBOUNCE_DONE_STATUS_BIT)) {
+		val->intval = POWER_SUPPLY_TYPEC_NONE;
+		return rc;
 	}
 
-	if (chg->typec_status[3] & UFP_DFP_MODE_STATUS_BIT)
+	if (stat & UFP_DFP_MODE_STATUS_BIT)
 		val->intval = smblib_get_prop_dfp_mode(chg);
 	else
 		val->intval = smblib_get_prop_ufp_mode(chg);
 
-	return 0;
+	return rc;
 }
 
 int smblib_get_prop_typec_power_role(struct smb_charger *chg,
@@ -2359,7 +2839,16 @@ int smblib_get_prop_input_voltage_settled(struct smb_charger *chg,
 int smblib_get_prop_pd_in_hard_reset(struct smb_charger *chg,
 			       union power_supply_propval *val)
 {
-	val->intval = chg->pd_hard_reset;
+	int rc;
+	u8 ctrl;
+
+	rc = smblib_read(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG, &ctrl);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG rc=%d\n",
+			rc);
+		return rc;
+	}
+	val->intval = ctrl & EXIT_SNK_BASED_ON_CC_BIT;
 	return 0;
 }
 
@@ -2488,22 +2977,6 @@ int smblib_set_prop_typec_power_role(struct smb_charger *chg,
 		return -EINVAL;
 	}
 
-	if (power_role == UFP_EN_CMD_BIT) {
-		/* disable PBS workaround when forcing sink mode */
-		rc = smblib_write(chg, TM_IO_DTEST4_SEL, 0x0);
-		if (rc < 0) {
-			smblib_err(chg, "Couldn't write to TM_IO_DTEST4_SEL rc=%d\n",
-				rc);
-		}
-	} else {
-		/* restore it back to 0xA5 */
-		rc = smblib_write(chg, TM_IO_DTEST4_SEL, 0xA5);
-		if (rc < 0) {
-			smblib_err(chg, "Couldn't write to TM_IO_DTEST4_SEL rc=%d\n",
-				rc);
-		}
-	}
-
 	rc = smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
 				 TYPEC_POWER_ROLE_CMD_MASK, power_role);
 	if (rc < 0) {
@@ -2529,6 +3002,10 @@ int smblib_set_prop_usb_voltage_min(struct smb_charger *chg,
 		return rc;
 	}
 
+	if (chg->mode == PARALLEL_MASTER)
+		vote(chg->pl_enable_votable_indirect, USBIN_V_VOTER,
+		     min_uv > MICRO_5V, 0);
+
 	chg->voltage_min_uv = min_uv;
 	return rc;
 }
@@ -2537,6 +3014,14 @@ int smblib_set_prop_usb_voltage_max(struct smb_charger *chg,
 				    const union power_supply_propval *val)
 {
 	int rc, max_uv;
+
+#ifdef CONFIG_HTC_BATT
+	if (val->intval > MICRO_9V) {
+		smblib_err(chg, "invalid min voltage %duV\n",
+			val->intval);
+		return 0;
+	}
+#endif //CONFIG_HTC_BATT
 
 	max_uv = max(val->intval, chg->voltage_min_uv);
 	rc = smblib_set_usb_pd_allowed_voltage(chg, chg->voltage_min_uv,
@@ -2548,6 +3033,10 @@ int smblib_set_prop_usb_voltage_max(struct smb_charger *chg,
 	}
 
 	chg->voltage_max_uv = max_uv;
+	rc = smblib_rerun_aicl(chg);
+	if (rc < 0)
+		smblib_err(chg, "Couldn't re-run AICL rc=%d\n", rc);
+
 	return rc;
 }
 
@@ -2555,101 +3044,104 @@ int smblib_set_prop_pd_active(struct smb_charger *chg,
 			      const union power_supply_propval *val)
 {
 	int rc;
-	bool orientation, cc_debounced, sink_attached, hvdcp;
-	u8 stat;
+	u8 stat = 0;
+	bool cc_debounced;
+	bool orientation;
+	bool pd_active = val->intval;
 
-	if (!get_effective_result(chg->pd_allowed_votable))
+	if (!get_effective_result(chg->pd_allowed_votable)) {
+		smblib_err(chg, "PD is not allowed\n");
 		return -EINVAL;
+	}
 
-	rc = smblib_read(chg, APSD_STATUS_REG, &stat);
+	vote(chg->apsd_disable_votable, PD_VOTER, pd_active, 0);
+	vote(chg->pd_allowed_votable, PD_VOTER, pd_active, 0);
+	vote(chg->usb_irq_enable_votable, PD_VOTER, pd_active, 0);
+
+	/*
+	 * VCONN_EN_ORIENTATION_BIT controls whether to use CC1 or CC2 line
+	 * when TYPEC_SPARE_CFG_BIT (CC pin selection s/w override) is set
+	 * or when VCONN_EN_VALUE_BIT is set.
+	 */
+	rc = smblib_read(chg, TYPE_C_STATUS_4_REG, &stat);
 	if (rc < 0) {
-		smblib_err(chg, "Couldn't read APSD status rc=%d\n", rc);
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_4 rc=%d\n", rc);
 		return rc;
 	}
 
-	cc_debounced = (bool)
-		(chg->typec_status[3] & TYPEC_DEBOUNCE_DONE_STATUS_BIT);
-	sink_attached = (bool)
-		(chg->typec_status[3] & UFP_DFP_MODE_STATUS_BIT);
-	hvdcp = stat & QC_CHARGER_BIT;
-
-	chg->pd_active = val->intval;
-	if (chg->pd_active) {
-		vote(chg->apsd_disable_votable, PD_VOTER, true, 0);
-		vote(chg->pd_allowed_votable, PD_VOTER, true, 0);
-		vote(chg->usb_irq_enable_votable, PD_VOTER, true, 0);
-
-		/*
-		 * VCONN_EN_ORIENTATION_BIT controls whether to use CC1 or CC2
-		 * line when TYPEC_SPARE_CFG_BIT (CC pin selection s/w override)
-		 * is set or when VCONN_EN_VALUE_BIT is set.
-		 */
-		orientation = chg->typec_status[3] & CC_ORIENTATION_BIT;
+	if (pd_active) {
+		orientation = stat & CC_ORIENTATION_BIT;
 		rc = smblib_masked_write(chg,
 				TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
 				VCONN_EN_ORIENTATION_BIT,
 				orientation ? 0 : VCONN_EN_ORIENTATION_BIT);
-		if (rc < 0)
+		if (rc < 0) {
 			smblib_err(chg,
 				"Couldn't enable vconn on CC line rc=%d\n", rc);
-
-		/* SW controlled CC_OUT */
-		rc = smblib_masked_write(chg, TAPER_TIMER_SEL_CFG_REG,
-				TYPEC_SPARE_CFG_BIT, TYPEC_SPARE_CFG_BIT);
-		if (rc < 0)
-			smblib_err(chg, "Couldn't enable SW cc_out rc=%d\n",
-									rc);
-
+			return rc;
+		}
 		/*
 		 * Enforce 500mA for PD until the real vote comes in later.
 		 * It is guaranteed that pd_active is set prior to
 		 * pd_current_max
 		 */
 		rc = vote(chg->usb_icl_votable, PD_VOTER, true, USBIN_500MA);
-		if (rc < 0)
+		if (rc < 0) {
 			smblib_err(chg, "Couldn't vote for USB ICL rc=%d\n",
-									rc);
-
-		/* since PD was found the cable must be non-legacy */
-		vote(chg->usb_icl_votable, LEGACY_UNKNOWN_VOTER, false, 0);
+					rc);
+			return rc;
+		}
 
 		/* clear USB ICL vote for DCP_VOTER */
 		rc = vote(chg->usb_icl_votable, DCP_VOTER, false, 0);
 		if (rc < 0)
-			smblib_err(chg, "Couldn't un-vote DCP from USB ICL rc=%d\n",
-									rc);
+			smblib_err(chg,
+				"Couldn't un-vote DCP from USB ICL rc=%d\n",
+				rc);
+
+		/* clear USB ICL vote for PL_USBIN_USBIN_VOTER */
+		rc = vote(chg->usb_icl_votable, PL_USBIN_USBIN_VOTER, false, 0);
+		if (rc < 0)
+			smblib_err(chg,
+					"Couldn't un-vote PL_USBIN_USBIN from USB ICL rc=%d\n",
+					rc);
 
 		/* remove USB_PSY_VOTER */
 		rc = vote(chg->usb_icl_votable, USB_PSY_VOTER, false, 0);
-		if (rc < 0)
+		if (rc < 0) {
 			smblib_err(chg, "Couldn't unvote USB_PSY rc=%d\n", rc);
-	} else {
-		vote(chg->apsd_disable_votable, PD_VOTER, false, 0);
-		vote(chg->pd_allowed_votable, PD_VOTER, true, 0);
-		vote(chg->usb_irq_enable_votable, PD_VOTER, true, 0);
-		vote(chg->hvdcp_disable_votable_indirect, PD_INACTIVE_VOTER,
-								false, 0);
+			return rc;
+		}
 
-		/* HW controlled CC_OUT */
-		rc = smblib_masked_write(chg, TAPER_TIMER_SEL_CFG_REG,
-							TYPEC_SPARE_CFG_BIT, 0);
-		if (rc < 0)
-			smblib_err(chg, "Couldn't enable HW cc_out rc=%d\n",
-									rc);
-
-		/*
-		 * This WA should only run for HVDCP. Non-legacy SDP/CDP could
-		 * draw more, but this WA will remove Rd causing VBUS to drop,
-		 * and data could be interrupted. Non-legacy DCP could also draw
-		 * more, but it may impact compliance.
-		 */
-		if (!chg->typec_legacy_valid && cc_debounced &&
-							!sink_attached && hvdcp)
-			schedule_work(&chg->legacy_detection_work);
+		/* pd active set, parallel charger can be enabled now */
+		rc = vote(chg->pl_disable_votable, PL_DELAY_HVDCP_VOTER,
+				false, 0);
+		if (rc < 0) {
+			smblib_err(chg,
+				"Couldn't unvote PL_DELAY_HVDCP_VOTER rc=%d\n",
+				rc);
+			return rc;
+		}
 	}
 
+	/* CC pin selection s/w override in PD session; h/w otherwise. */
+	rc = smblib_masked_write(chg, TAPER_TIMER_SEL_CFG_REG,
+				 TYPEC_SPARE_CFG_BIT,
+				 pd_active ? TYPEC_SPARE_CFG_BIT : 0);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't change cc_out ctrl to %s rc=%d\n",
+			pd_active ? "SW" : "HW", rc);
+		return rc;
+	}
+
+	cc_debounced = (bool)(stat & TYPEC_DEBOUNCE_DONE_STATUS_BIT);
+	if (!pd_active && cc_debounced)
+		try_rerun_apsd_for_hvdcp(chg);
+
+	chg->pd_active = pd_active;
 	smblib_update_usb_type(chg);
 	power_supply_changed(chg->usb_psy);
+
 	return rc;
 }
 
@@ -2717,6 +3209,12 @@ int smblib_reg_block_restore(struct smb_charger *chg,
 
 static struct reg_info cc2_detach_settings[] = {
 	{
+		.reg	= TYPE_C_CFG_REG,
+		.mask	= APSD_START_ON_CC_BIT,
+		.val	= 0,
+		.desc	= "TYPE_C_CFG_REG",
+	},
+	{
 		.reg	= TYPE_C_CFG_2_REG,
 		.mask	= TYPE_C_UFP_MODE_BIT | EN_TRY_SOURCE_MODE_BIT,
 		.val	= TYPE_C_UFP_MODE_BIT,
@@ -2752,70 +3250,88 @@ static struct reg_info cc2_detach_settings[] = {
 
 static int smblib_cc2_sink_removal_enter(struct smb_charger *chg)
 {
-	int rc, ccout, ufp_mode;
-	u8 stat;
+	int rc = 0;
+	union power_supply_propval cc2_val = {0, };
 
 	if ((chg->wa_flags & TYPEC_CC2_REMOVAL_WA_BIT) == 0)
-		return 0;
+		return rc;
 
-	if (chg->cc2_detach_wa_active)
-		return 0;
+	if (chg->cc2_sink_detach_flag != CC2_SINK_NONE)
+		return rc;
 
-	rc = smblib_read(chg, TYPE_C_STATUS_4_REG, &stat);
+	rc = smblib_get_prop_typec_cc_orientation(chg, &cc2_val);
 	if (rc < 0) {
-		smblib_err(chg, "Couldn't read TYPE_C_STATUS_4 rc=%d\n", rc);
+		smblib_err(chg, "Couldn't get cc orientation rc=%d\n", rc);
 		return rc;
 	}
-	ccout = (stat & CC_ATTACHED_BIT) ?
-					(!!(stat & CC_ORIENTATION_BIT) + 1) : 0;
-	ufp_mode = (stat & TYPEC_DEBOUNCE_DONE_STATUS_BIT) ?
-					!(stat & UFP_DFP_MODE_STATUS_BIT) : 0;
+	if (cc2_val.intval == 1)
+		return rc;
 
-	if (ccout != 2)
-		return 0;
+	rc = smblib_get_prop_typec_mode(chg, &cc2_val);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't get prop typec mode rc=%d\n", rc);
+		return rc;
+	}
 
-	if (!ufp_mode)
-		return 0;
+	switch (cc2_val.intval) {
+	case POWER_SUPPLY_TYPEC_SOURCE_DEFAULT:
+		smblib_reg_block_update(chg, cc2_detach_settings);
+		chg->cc2_sink_detach_flag = CC2_SINK_STD;
+		schedule_work(&chg->rdstd_cc2_detach_work);
+		break;
+	case POWER_SUPPLY_TYPEC_SOURCE_MEDIUM:
+	case POWER_SUPPLY_TYPEC_SOURCE_HIGH:
+		chg->cc2_sink_detach_flag = CC2_SINK_MEDIUM_HIGH;
+		break;
+	default:
+		break;
+	}
 
-	chg->cc2_detach_wa_active = true;
-	/* The CC2 removal WA will cause a type-c-change IRQ storm */
-	smblib_reg_block_update(chg, cc2_detach_settings);
-	schedule_work(&chg->rdstd_cc2_detach_work);
 	return rc;
 }
 
 static int smblib_cc2_sink_removal_exit(struct smb_charger *chg)
 {
+	int rc = 0;
+
 	if ((chg->wa_flags & TYPEC_CC2_REMOVAL_WA_BIT) == 0)
-		return 0;
+		return rc;
 
-	if (!chg->cc2_detach_wa_active)
-		return 0;
+	if (chg->cc2_sink_detach_flag == CC2_SINK_STD) {
+		cancel_work_sync(&chg->rdstd_cc2_detach_work);
+		smblib_reg_block_restore(chg, cc2_detach_settings);
+	}
 
-	chg->cc2_detach_wa_active = false;
-	cancel_work_sync(&chg->rdstd_cc2_detach_work);
-	smblib_reg_block_restore(chg, cc2_detach_settings);
-	return 0;
+	chg->cc2_sink_detach_flag = CC2_SINK_NONE;
+
+	return rc;
 }
 
 int smblib_set_prop_pd_in_hard_reset(struct smb_charger *chg,
 				const union power_supply_propval *val)
 {
-	int rc = 0;
+	int rc;
 
-	if (chg->pd_hard_reset == val->intval)
-		return rc;
-
-	chg->pd_hard_reset = val->intval;
 	rc = smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
-			EXIT_SNK_BASED_ON_CC_BIT,
-			(chg->pd_hard_reset) ? EXIT_SNK_BASED_ON_CC_BIT : 0);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't set EXIT_SNK_BASED_ON_CC rc=%d\n",
+				 EXIT_SNK_BASED_ON_CC_BIT,
+				 (val->intval) ? EXIT_SNK_BASED_ON_CC_BIT : 0);
+	if (rc < 0) {
+		smblib_err(chg, "Could not set EXIT_SNK_BASED_ON_CC rc=%d\n",
 				rc);
+		return rc;
+	}
 
-	vote(chg->apsd_disable_votable, PD_HARD_RESET_VOTER,
-							chg->pd_hard_reset, 0);
+	vote(chg->apsd_disable_votable, PD_HARD_RESET_VOTER, val->intval, 0);
+
+	if (val->intval)
+		rc = smblib_cc2_sink_removal_enter(chg);
+	else
+		rc = smblib_cc2_sink_removal_exit(chg);
+
+	if (rc < 0) {
+		smblib_err(chg, "Could not detect cc2 removal rc=%d\n", rc);
+		return rc;
+	}
 
 	return rc;
 }
@@ -2860,20 +3376,14 @@ int smblib_get_prop_fcc_delta(struct smb_charger *chg,
 #define TYPEC_DEFAULT_CURRENT_MA	900000
 #define TYPEC_MEDIUM_CURRENT_MA		1500000
 #define TYPEC_HIGH_CURRENT_MA		3000000
-int smblib_get_charge_current(struct smb_charger *chg,
+static int smblib_get_charge_current(struct smb_charger *chg,
 				int *total_current_ua)
 {
-	const struct apsd_result *apsd_result = smblib_get_apsd_result(chg);
+	const struct apsd_result *apsd_result = smblib_update_usb_type(chg);
 	union power_supply_propval val = {0, };
-	int rc = 0, typec_source_rd, current_ua;
+	int rc, typec_source_rd, current_ua;
 	bool non_compliant;
 	u8 stat5;
-
-	if (chg->pd_active) {
-		*total_current_ua =
-			get_client_vote_locked(chg->usb_icl_votable, PD_VOTER);
-		return rc;
-	}
 
 	rc = smblib_read(chg, TYPE_C_STATUS_5_REG, &stat5);
 	if (rc < 0) {
@@ -2949,12 +3459,39 @@ int smblib_get_charge_current(struct smb_charger *chg,
 	return 0;
 }
 
+int smblib_set_icl_reduction(struct smb_charger *chg, int reduction_ua)
+{
+	int current_ua, rc;
+
+	if (reduction_ua == 0) {
+		vote(chg->usb_icl_votable, PL_USBIN_USBIN_VOTER, false, 0);
+	} else {
+		/*
+		 * No usb_icl voter means we are defaulting to hw chosen
+		 * max limit. We need a vote from s/w to enforce the reduction.
+		 */
+		if (get_effective_result(chg->usb_icl_votable) == -EINVAL) {
+			rc = smblib_get_charge_current(chg, &current_ua);
+			if (rc < 0) {
+				pr_err("Failed to get ICL rc=%d\n", rc);
+				return rc;
+			}
+			vote(chg->usb_icl_votable, PL_USBIN_USBIN_VOTER, true,
+					current_ua);
+		}
+	}
+
+	chg->icl_reduction_ua = reduction_ua;
+
+	return rerun_election(chg->usb_icl_votable);
+}
+
 /************************
  * PARALLEL PSY GETTERS *
  ************************/
 
 int smblib_get_prop_slave_current_now(struct smb_charger *chg,
-		union power_supply_propval *pval)
+				      union power_supply_propval *pval)
 {
 	if (IS_ERR_OR_NULL(chg->iio.batt_i_chan))
 		chg->iio.batt_i_chan = iio_channel_get(chg->dev, "batt_i");
@@ -2973,7 +3510,16 @@ irqreturn_t smblib_handle_debug(int irq, void *data)
 {
 	struct smb_irq_data *irq_data = data;
 	struct smb_charger *chg = irq_data->parent_data;
+#ifdef CONFIG_HTC_BATT
+	bool is_log_print = true;
 
+	if (strcmp(irq_data->name, "input-current-limiting") == 0)
+		is_log_print = false;
+
+	if (!is_log_print)
+		smblib_dbg(chg, PR_REGISTER, "IRQ: %s\n", irq_data->name);
+	else
+#endif //CONFIG_HTC_BATT
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: %s\n", irq_data->name);
 	return IRQ_HANDLED;
 }
@@ -3017,7 +3563,7 @@ irqreturn_t smblib_handle_chg_state_change(int irq, void *data)
 	rc = smblib_read(chg, BATTERY_CHARGER_STATUS_1_REG, &stat);
 	if (rc < 0) {
 		smblib_err(chg, "Couldn't read BATTERY_CHARGER_STATUS_1 rc=%d\n",
-				rc);
+			rc);
 		return IRQ_HANDLED;
 	}
 
@@ -3122,59 +3668,24 @@ irqreturn_t smblib_handle_usbin_uv(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static void smblib_micro_usb_plugin(struct smb_charger *chg, bool vbus_rising)
+irqreturn_t smblib_handle_usb_plugin(int irq, void *data)
 {
-	if (vbus_rising) {
-		/* use the typec flag even though its not typec */
-		chg->typec_present = 1;
-	} else {
-		chg->typec_present = 0;
-		smblib_update_usb_type(chg);
-		extcon_set_cable_state_(chg->extcon, EXTCON_USB, false);
-		smblib_uusb_removal(chg);
-	}
-}
-
-void smblib_usb_plugin_hard_reset_locked(struct smb_charger *chg)
-{
+	struct smb_irq_data *irq_data = data;
+	struct smb_charger *chg = irq_data->parent_data;
 	int rc;
 	u8 stat;
 	bool vbus_rising;
 
 	rc = smblib_read(chg, USBIN_BASE + INT_RT_STS_OFFSET, &stat);
 	if (rc < 0) {
-		smblib_err(chg, "Couldn't read USB_INT_RT_STS rc=%d\n", rc);
-		return;
+		dev_err(chg->dev, "Couldn't read USB_INT_RT_STS rc=%d\n", rc);
+		return IRQ_HANDLED;
 	}
 
 	vbus_rising = (bool)(stat & USBIN_PLUGIN_RT_STS_BIT);
-
-	if (vbus_rising)
-		smblib_cc2_sink_removal_exit(chg);
-	else
-		smblib_cc2_sink_removal_enter(chg);
-
-	power_supply_changed(chg->usb_psy);
-	smblib_dbg(chg, PR_INTERRUPT, "IRQ: usbin-plugin %s\n",
-					vbus_rising ? "attached" : "detached");
-}
-
-#define PL_DELAY_MS			30000
-void smblib_usb_plugin_locked(struct smb_charger *chg)
-{
-	int rc;
-	u8 stat;
-	bool vbus_rising;
-
-	rc = smblib_read(chg, USBIN_BASE + INT_RT_STS_OFFSET, &stat);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't read USB_INT_RT_STS rc=%d\n", rc);
-		return;
-	}
-
-	vbus_rising = (bool)(stat & USBIN_PLUGIN_RT_STS_BIT);
-	smblib_set_opt_freq_buck(chg, vbus_rising ? chg->chg_freq.freq_5V :
-						chg->chg_freq.freq_removal);
+	smblib_set_opt_freq_buck(chg,
+		vbus_rising ? chg->chg_freq.freq_5V :
+			chg->chg_freq.freq_removal);
 
 	/* fetch the DPDM regulator */
 	if (!chg->dpdm_reg && of_get_property(chg->dev->of_node,
@@ -3195,11 +3706,6 @@ void smblib_usb_plugin_locked(struct smb_charger *chg)
 				smblib_err(chg, "Couldn't enable dpdm regulator rc=%d\n",
 					rc);
 		}
-
-		/* Schedule work to enable parallel charger */
-		vote(chg->awake_votable, PL_DELAY_VOTER, true, 0);
-		schedule_delayed_work(&chg->pl_enable_work,
-					msecs_to_jiffies(PL_DELAY_MS));
 	} else {
 		if (chg->wa_flags & BOOST_BACK_WA)
 			vote(chg->usb_icl_votable, BOOST_BACK_VOTER, false, 0);
@@ -3211,27 +3717,60 @@ void smblib_usb_plugin_locked(struct smb_charger *chg)
 				smblib_err(chg, "Couldn't disable dpdm regulator rc=%d\n",
 					rc);
 		}
+
+		if (chg->micro_usb_mode) {
+			smblib_update_usb_type(chg);
+			extcon_set_cable_state_(chg->extcon, EXTCON_USB, false);
+			smblib_uusb_removal(chg);
+		}
+#ifdef CONFIG_HTC_BATT
+			rc = smblib_masked_write(chg, USBIN_ICL_OPTIONS_REG,
+					CFG_USB3P0_SEL_BIT | USB51_MODE_BIT | USBIN_MODE_CHG_BIT, 0);
+			if (rc < 0)
+				smblib_err(chg, "Couldn't set USBIN_ICL_OPTIONS rc=%d\n", rc);
+
+			// Control ICL limit by APSD
+			rc = smblib_masked_write(chg, USBIN_LOAD_CFG_REG,
+						 ICL_OVERRIDE_AFTER_APSD_BIT, 0);
+			smblib_dbg(chg, PR_INTERRUPT, "use APSD ICL setting\n");
+			cancel_delayed_work_sync(&chg->chk_usb_icl_work);
+
+			// Float charger related
+			htc_notify_unknown_charger(false);
+			chg->float_chk_sts = FLOAT_NONE;
+			chg->float_chk_cnt = 0;
+			cancel_delayed_work_sync(&chg->floating_chk_work);
+			smblib_dbg(chg, PR_INTERRUPT, "CHK_FLOATING:%d,cnt=%d,\n",
+					chg->float_chk_sts, chg->float_chk_cnt);
+
+			// abnormal cc check
+			chg->abnormal_cc_check_sts = false;
+
+			// reverse boost check
+			cancel_delayed_work_sync(&chg->reverse_boost_chk_work);
+
+			// FTM WA for recover charging for none DCP charger
+			if (!strcmp(htc_get_bootmode(),"ftm")) {
+				smblib_err(chg, "%s: Under FTM mode, recover charging for cable out.", __func__);
+				htc_ftm_disable_charger(false);
+			}
+
+			// cc pin floating cable
+			g_cc_floating_cnt = 0;
+			rc = smblib_masked_write(chg, TYPE_C_CFG_REG, TYPE_C_OR_U_USB_BIT, 0);
+			if (rc < 0)
+				dev_err(chg->dev, "Couldn't write register, rc=%d\n", rc);
+			cancel_delayed_work_sync(&chg->cc_floating_chk_work);
+
+			// Clear CC detection result
+			chg->cc_first_det_sts = CC_DET_NONE;
+#endif //CONFIG_HTC_BATT
 	}
 
-	if (chg->micro_usb_mode)
-		smblib_micro_usb_plugin(chg, vbus_rising);
-
 	power_supply_changed(chg->usb_psy);
-	smblib_dbg(chg, PR_INTERRUPT, "IRQ: usbin-plugin %s\n",
-					vbus_rising ? "attached" : "detached");
-}
+	smblib_dbg(chg, PR_INTERRUPT, "IRQ: %s %s\n",
+		irq_data->name, vbus_rising ? "attached" : "detached");
 
-irqreturn_t smblib_handle_usb_plugin(int irq, void *data)
-{
-	struct smb_irq_data *irq_data = data;
-	struct smb_charger *chg = irq_data->parent_data;
-
-	mutex_lock(&chg->lock);
-	if (chg->pd_hard_reset)
-		smblib_usb_plugin_hard_reset_locked(chg);
-	else
-		smblib_usb_plugin_locked(chg);
-	mutex_unlock(&chg->lock);
 	return IRQ_HANDLED;
 }
 
@@ -3243,6 +3782,10 @@ irqreturn_t smblib_handle_icl_change(int irq, void *data)
 	int rc, settled_ua, delay = ICL_CHANGE_DELAY_MS;
 	struct smb_irq_data *irq_data = data;
 	struct smb_charger *chg = irq_data->parent_data;
+#ifdef CONFIG_HTC_BATT
+	static int pre_settled_ua = 0;
+	smblib_dbg(chg, PR_REGISTER, "IRQ: %s\n", irq_data->name);
+#endif //CONFIG_HTC_BATT
 
 	if (chg->mode == PARALLEL_MASTER) {
 		rc = smblib_read(chg, AICL_STATUS_REG, &stat);
@@ -3260,10 +3803,18 @@ irqreturn_t smblib_handle_icl_change(int irq, void *data)
 		}
 
 		/* If AICL settled then schedule work now */
+#ifndef CONFIG_HTC_BATT
 		if ((settled_ua == get_effective_result(chg->usb_icl_votable))
 				|| (stat & AICL_DONE_BIT))
+#else
+		if ((settled_ua == get_effective_result(chg->usb_icl_votable)) &&
+				(pre_settled_ua != settled_ua))
+#endif //CONFIG_HTC_BATT
 			delay = 0;
 
+#ifdef CONFIG_HTC_BATT
+		pre_settled_ua = settled_ua;
+#endif //CONFIG_HTC_BATT
 		cancel_delayed_work_sync(&chg->icl_change_work);
 		schedule_delayed_work(&chg->icl_change_work,
 						msecs_to_jiffies(delay));
@@ -3296,7 +3847,7 @@ static void smblib_hvdcp_adaptive_voltage_change(struct smb_charger *chg)
 	int pulses;
 
 	power_supply_changed(chg->usb_main_psy);
-	if (chg->real_charger_type == POWER_SUPPLY_TYPE_USB_HVDCP) {
+	if (chg->usb_psy_desc.type == POWER_SUPPLY_TYPE_USB_HVDCP) {
 		rc = smblib_read(chg, QC_CHANGE_STATUS_REG, &stat);
 		if (rc < 0) {
 			smblib_err(chg,
@@ -3324,7 +3875,7 @@ static void smblib_hvdcp_adaptive_voltage_change(struct smb_charger *chg)
 		}
 	}
 
-	if (chg->real_charger_type == POWER_SUPPLY_TYPE_USB_HVDCP_3) {
+	if (chg->usb_psy_desc.type == POWER_SUPPLY_TYPE_USB_HVDCP_3) {
 		rc = smblib_read(chg, QC_PULSE_COUNT_STATUS_REG, &stat);
 		if (rc < 0) {
 			smblib_err(chg,
@@ -3387,6 +3938,9 @@ static void smblib_handle_hvdcp_3p0_auth_done(struct smb_charger *chg,
 		}
 	}
 
+	/* QC authentication done, parallel charger can be enabled now */
+	vote(chg->pl_disable_votable, PL_DELAY_HVDCP_VOTER, false, 0);
+
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: hvdcp-3p0-auth-done rising; %s detected\n",
 		   apsd_result->name);
 }
@@ -3394,16 +3948,23 @@ static void smblib_handle_hvdcp_3p0_auth_done(struct smb_charger *chg,
 static void smblib_handle_hvdcp_check_timeout(struct smb_charger *chg,
 					      bool rising, bool qc_charger)
 {
-	const struct apsd_result *apsd_result = smblib_get_apsd_result(chg);
+	const struct apsd_result *apsd_result = smblib_update_usb_type(chg);
 
 	/* Hold off PD only until hvdcp 2.0 detection timeout */
 	if (rising) {
 		vote(chg->pd_disallowed_votable_indirect, HVDCP_TIMEOUT_VOTER,
 								false, 0);
+		if (get_effective_result(chg->pd_disallowed_votable_indirect))
+			/* could be a legacy cable, try doing hvdcp */
+			try_rerun_apsd_for_hvdcp(chg);
 
 		/* enable HDC and ICL irq for QC2/3 charger */
-		if (qc_charger)
+		if (qc_charger) {
+#ifdef CONFIG_HTC_BATT /* Not enable HDC irq to fix QC3 stability issue */
+			is_gc_charger_vote_usb_irq_enable = true;
+#endif
 			vote(chg->usb_irq_enable_votable, QC_VOTER, true, 0);
+		}
 
 		/*
 		 * HVDCP detection timeout done
@@ -3413,6 +3974,15 @@ static void smblib_handle_hvdcp_check_timeout(struct smb_charger *chg,
 			/* enforce DCP ICL if specified */
 			vote(chg->usb_icl_votable, DCP_VOTER,
 				chg->dcp_icl_ua != -EINVAL, chg->dcp_icl_ua);
+		/*
+		 * If adapter is not QC2.0/QC3.0 remove vote for parallel
+		 * disable.
+		 * Otherwise if adapter is QC2.0/QC3.0 wait for authentication
+		 * to complete.
+		 */
+		if (!qc_charger)
+			vote(chg->pl_disable_votable, PL_DELAY_HVDCP_VOTER,
+					false, 0);
 	}
 
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: smblib_handle_hvdcp_check_timeout %s\n",
@@ -3430,56 +4000,36 @@ static void smblib_handle_hvdcp_detect_done(struct smb_charger *chg,
 	cancel_delayed_work_sync(&chg->hvdcp_detect_work);
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: hvdcp-detect-done %s\n",
 		   rising ? "rising" : "falling");
-}
 
-static void smblib_force_legacy_icl(struct smb_charger *chg, int pst)
-{
-	/* while PD is active it should have complete ICL control */
-	if (chg->pd_active)
-		return;
-
-	switch (pst) {
-	case POWER_SUPPLY_TYPE_USB:
-		/*
-		 * USB_PSY will vote to increase the current to 500/900mA once
-		 * enumeration is done. Ensure that USB_PSY has at least voted
-		 * for 100mA before releasing the LEGACY_UNKNOWN vote
-		 */
-		if (!is_client_vote_enabled(chg->usb_icl_votable,
-								USB_PSY_VOTER))
-			vote(chg->usb_icl_votable, USB_PSY_VOTER, true, 100000);
-		vote(chg->usb_icl_votable, LEGACY_UNKNOWN_VOTER, false, 0);
-		break;
-	case POWER_SUPPLY_TYPE_USB_CDP:
-		vote(chg->usb_icl_votable, LEGACY_UNKNOWN_VOTER, true, 1500000);
-		break;
-	case POWER_SUPPLY_TYPE_USB_DCP:
-		vote(chg->usb_icl_votable, LEGACY_UNKNOWN_VOTER, true, 1500000);
-		break;
-	case POWER_SUPPLY_TYPE_USB_HVDCP:
-	case POWER_SUPPLY_TYPE_USB_HVDCP_3:
-		vote(chg->usb_icl_votable, LEGACY_UNKNOWN_VOTER, true, 3000000);
-		break;
-	default:
-		smblib_err(chg, "Unknown APSD %d; forcing 500mA\n", pst);
-		vote(chg->usb_icl_votable, LEGACY_UNKNOWN_VOTER, true, 500000);
-		break;
-	}
+#ifdef CONFIG_HTC_BATT
+	// Control ICL limit by SW
+	smblib_masked_write(chg, USBIN_LOAD_CFG_REG,
+				ICL_OVERRIDE_AFTER_APSD_BIT, ICL_OVERRIDE_AFTER_APSD_BIT);
+	smblib_dbg(chg, PR_INTERRUPT, "force SW ICL setting\n");
+#endif //CONFIG_HTC_BATT
 }
 
 #define HVDCP_DET_MS 2500
+#ifdef CONFIG_HTC_BATT
+#define ICL_CHECK_DELAY_MS	10000
+#define FLOAT_BOOST_CHK_DELAY_MS	1000
+#define FLOAT_CHARGER_CHK_DELAY_MS	10000
+#endif //CONFIG_HTC_BATT
 static void smblib_handle_apsd_done(struct smb_charger *chg, bool rising)
 {
 	const struct apsd_result *apsd_result;
+#ifdef CONFIG_HTC_BATT
+	u8 apsd_result_sts = 0;
+	u8 chgr_sts_8 = 0;
+#endif //CONFIG_HTC_BATT
 
 	if (!rising)
 		return;
 
+	smblib_read(chg, APSD_RESULT_STATUS_REG, &apsd_result_sts);
+	smblib_read(chg, BATTERY_CHARGER_STATUS_8_REG, &chgr_sts_8);
+
 	apsd_result = smblib_update_usb_type(chg);
-
-	if (!chg->typec_legacy_valid)
-		smblib_force_legacy_icl(chg, apsd_result->pst);
-
 	switch (apsd_result->bit) {
 	case SDP_CHARGER_BIT:
 	case CDP_CHARGER_BIT:
@@ -3488,11 +4038,50 @@ static void smblib_handle_apsd_done(struct smb_charger *chg, bool rising)
 					true);
 	case OCP_CHARGER_BIT:
 	case FLOAT_CHARGER_BIT:
-		/* if not DCP then no hvdcp timeout happens, Enable pd here. */
+		/*
+		 * if not DCP then no hvdcp timeout happens. Enable
+		 * pd/parallel here.
+		 */
 		vote(chg->pd_disallowed_votable_indirect, HVDCP_TIMEOUT_VOTER,
 				false, 0);
+		vote(chg->pl_disable_votable, PL_DELAY_HVDCP_VOTER, false, 0);
+#ifdef CONFIG_HTC_BATT
+		if (apsd_result_sts & FLOAT_CHARGER_BIT){
+			vote(chg->usb_icl_votable, USB_PSY_VOTER, true, USBIN_500MA);
+			if (chg->float_chk_sts == FLOAT_CHECKING) {
+				chg->float_chk_sts = FLOAT_DETECTED;
+				htc_notify_unknown_charger(true);
+			} else {
+				if (chgr_sts_8 & PRE_TERM_BIT) {
+					// schedule check for reverse boost
+					if (chg->float_chk_sts == FLOAT_NONE)
+						schedule_delayed_work(&chg->floating_chk_work, msecs_to_jiffies(FLOAT_BOOST_CHK_DELAY_MS));
+				} else {
+					chg->float_chk_sts = FLOAT_CHECKING;
+					schedule_delayed_work(&chg->floating_chk_work, msecs_to_jiffies(FLOAT_CHARGER_CHK_DELAY_MS));
+				}
+			}
+		} else {
+			// Set ICL 1500mA for OCP
+			vote(chg->usb_icl_votable, USB_PSY_VOTER, true, USBIN_1500MA);
+		}
+
+		// FTM WA for disable charging for none DCP charger
+		if (!strcmp(htc_get_bootmode(),"ftm")) {
+			if (apsd_result_sts & SDP_CHARGER_BIT){
+				smblib_err(chg, "%s: Under FTM mode, default disable charger.", __func__);
+				htc_ftm_disable_charger(true);
+			}
+		}
+#endif //CONFIG_HTC_BATT
 		break;
 	case DCP_CHARGER_BIT:
+#ifdef CONFIG_HTC_BATT
+		if (!chg->pd_active)
+			vote(chg->usb_icl_votable, USB_PSY_VOTER, true, USBIN_1500MA);
+		smblib_masked_write(chg, CMD_HVDCP_2_REG, TRIGGER_AICL_BIT, TRIGGER_AICL_BIT);
+		schedule_delayed_work(&chg->chk_usb_icl_work, msecs_to_jiffies(ICL_CHECK_DELAY_MS));
+#endif //CONFIG_HTC_BATT
 		if (chg->wa_flags & QC_CHARGER_DETECTION_WA_BIT)
 			schedule_delayed_work(&chg->hvdcp_detect_work,
 					      msecs_to_jiffies(HVDCP_DET_MS));
@@ -3500,6 +4089,24 @@ static void smblib_handle_apsd_done(struct smb_charger *chg, bool rising)
 	default:
 		break;
 	}
+
+#ifdef CONFIG_HTC_BATT
+	rerun_election(chg->usb_icl_votable);
+
+	// for reverse boost checking loop
+	if (chgr_sts_8 & PRE_TERM_BIT) {
+		if ((chg->float_chk_sts == FLOAT_BOOST_CHECKING) || (chg->float_chk_sts == FLOAT_BOOST_DETECTED))
+			schedule_delayed_work(&chg->floating_chk_work, msecs_to_jiffies(FLOAT_BOOST_CHK_DELAY_MS));
+	} else {
+		if (apsd_result->bit != FLOAT_CHARGER_BIT){
+			htc_notify_unknown_charger(false);
+			chg->float_chk_sts = FLOAT_NONE;
+			chg->float_chk_cnt = 0;
+		}
+	}
+	smblib_dbg(chg, PR_INTERRUPT, "CHK_FLOATING:%d,cnt=%d,0x1308=0x%02x,0x100E=%02x\n",
+					chg->float_chk_sts, chg->float_chk_cnt, apsd_result_sts, chgr_sts_8);
+#endif //CONFIG_HTC_BATT
 
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: apsd-done rising; %s detected\n",
 		   apsd_result->name);
@@ -3518,17 +4125,6 @@ irqreturn_t smblib_handle_usb_source_change(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 	smblib_dbg(chg, PR_REGISTER, "APSD_STATUS = 0x%02x\n", stat);
-
-	if (chg->micro_usb_mode && (stat & APSD_DTC_STATUS_DONE_BIT)
-			&& !chg->uusb_apsd_rerun_done) {
-		/*
-		 * Force re-run APSD to handle slow insertion related
-		 * charger-mis-detection.
-		 */
-		chg->uusb_apsd_rerun_done = true;
-		smblib_rerun_apsd(chg);
-		return IRQ_HANDLED;
-	}
 
 	smblib_handle_apsd_done(chg,
 		(bool)(stat & APSD_DTC_STATUS_DONE_BIT));
@@ -3563,6 +4159,74 @@ irqreturn_t smblib_handle_usb_source_change(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+static void typec_source_removal(struct smb_charger *chg)
+{
+	int rc;
+
+	/* reset both usbin current and voltage votes */
+	vote(chg->pl_enable_votable_indirect, USBIN_I_VOTER, false, 0);
+	vote(chg->pl_enable_votable_indirect, USBIN_V_VOTER, false, 0);
+
+	cancel_delayed_work_sync(&chg->hvdcp_detect_work);
+
+	if (chg->wa_flags & QC_AUTH_INTERRUPT_WA_BIT) {
+		/* re-enable AUTH_IRQ_EN_CFG_BIT */
+		rc = smblib_masked_write(chg,
+				USBIN_SOURCE_CHANGE_INTRPT_ENB_REG,
+				AUTH_IRQ_EN_CFG_BIT, AUTH_IRQ_EN_CFG_BIT);
+		if (rc < 0)
+			smblib_err(chg,
+				"Couldn't enable QC auth setting rc=%d\n", rc);
+	}
+
+	/* reconfigure allowed voltage for HVDCP */
+#ifdef CONFIG_HTC_BATT
+	cancel_delayed_work_sync(&chg->cc_check_work);
+	rc = smblib_write(chg, USBIN_ADAPTER_ALLOW_CFG_REG,
+			  USBIN_ADAPTER_ALLOW_5V_TO_9V);
+	if (rc < 0)
+		smblib_err(chg, "Couldn't set USBIN_ADAPTER_ALLOW_5V_TO_9V rc=%d\n",
+			rc);
+#else
+	rc = smblib_set_adapter_allowance(chg,
+			USBIN_ADAPTER_ALLOW_5V_OR_9V_TO_12V);
+	if (rc < 0)
+		smblib_err(chg, "Couldn't set USBIN_ADAPTER_ALLOW_5V_OR_9V_TO_12V rc=%d\n",
+			rc);
+#endif
+
+	chg->voltage_min_uv = MICRO_5V;
+	chg->voltage_max_uv = MICRO_5V;
+
+	/* clear USB ICL vote for PD_VOTER */
+	rc = vote(chg->usb_icl_votable, PD_VOTER, false, 0);
+	if (rc < 0)
+		smblib_err(chg, "Couldn't un-vote PD from USB ICL rc=%d\n", rc);
+
+	/* clear USB ICL vote for USB_PSY_VOTER */
+	rc = vote(chg->usb_icl_votable, USB_PSY_VOTER, false, 0);
+	if (rc < 0)
+		smblib_err(chg,
+			"Couldn't un-vote USB_PSY from USB ICL rc=%d\n", rc);
+
+	/* clear USB ICL vote for DCP_VOTER */
+	rc = vote(chg->usb_icl_votable, DCP_VOTER, false, 0);
+	if (rc < 0)
+		smblib_err(chg,
+			"Couldn't un-vote DCP from USB ICL rc=%d\n", rc);
+
+	/* clear USB ICL vote for PL_USBIN_USBIN_VOTER */
+	rc = vote(chg->usb_icl_votable, PL_USBIN_USBIN_VOTER, false, 0);
+	if (rc < 0)
+		smblib_err(chg,
+			"Couldn't un-vote PL_USBIN_USBIN from USB ICL rc=%d\n",
+			rc);
+}
+
+static void typec_source_insertion(struct smb_charger *chg)
+{
+}
+
 static void typec_sink_insertion(struct smb_charger *chg)
 {
 	/* when a sink is inserted we should not wait on hvdcp timeout to
@@ -3581,198 +4245,229 @@ static void typec_sink_removal(struct smb_charger *chg)
 
 static void smblib_handle_typec_removal(struct smb_charger *chg)
 {
-	int rc;
-
-	chg->cc2_detach_wa_active = false;
-
-	/* reset APSD voters */
-	vote(chg->apsd_disable_votable, PD_HARD_RESET_VOTER, false, 0);
-	vote(chg->apsd_disable_votable, PD_VOTER, false, 0);
-
-	cancel_delayed_work_sync(&chg->pl_enable_work);
-	cancel_delayed_work_sync(&chg->hvdcp_detect_work);
-
-	/* reset input current limit voters */
-	vote(chg->usb_icl_votable, LEGACY_UNKNOWN_VOTER, true, 100000);
-	vote(chg->usb_icl_votable, PD_VOTER, false, 0);
-	vote(chg->usb_icl_votable, USB_PSY_VOTER, false, 0);
-	vote(chg->usb_icl_votable, DCP_VOTER, false, 0);
-	vote(chg->usb_icl_votable, PL_USBIN_USBIN_VOTER, false, 0);
-	vote(chg->usb_icl_votable, SW_QC3_VOTER, false, 0);
-
-	/* reset hvdcp voters */
-	vote(chg->hvdcp_disable_votable_indirect, VBUS_CC_SHORT_VOTER, true, 0);
-	vote(chg->hvdcp_disable_votable_indirect, PD_INACTIVE_VOTER, true, 0);
-
-	/* reset power delivery voters */
-	vote(chg->pd_allowed_votable, PD_VOTER, false, 0);
+#ifdef CONFIG_HTC_BATT
+	is_gc_charger_vote_usb_irq_enable = false;
+#endif
 	vote(chg->pd_disallowed_votable_indirect, CC_DETACHED_VOTER, true, 0);
 	vote(chg->pd_disallowed_votable_indirect, HVDCP_TIMEOUT_VOTER, true, 0);
-
-	/* reset usb irq voters */
+	vote(chg->pd_disallowed_votable_indirect, LEGACY_CABLE_VOTER, true, 0);
+	vote(chg->pd_disallowed_votable_indirect, VBUS_CC_SHORT_VOTER, true, 0);
+	vote(chg->pl_disable_votable, PL_DELAY_HVDCP_VOTER, true, 0);
 	vote(chg->usb_irq_enable_votable, PD_VOTER, false, 0);
 	vote(chg->usb_irq_enable_votable, QC_VOTER, false, 0);
 
-	/* reset parallel voters */
-	vote(chg->pl_disable_votable, PL_DELAY_VOTER, true, 0);
-	vote(chg->pl_enable_votable_indirect, USBIN_I_VOTER, false, 0);
-	vote(chg->pl_enable_votable_indirect, USBIN_V_VOTER, false, 0);
-	vote(chg->awake_votable, PL_DELAY_VOTER, false, 0);
+	/* reset votes from vbus_cc_short */
+	vote(chg->hvdcp_disable_votable_indirect, VBUS_CC_SHORT_VOTER,
+			true, 0);
+	vote(chg->hvdcp_disable_votable_indirect, PD_INACTIVE_VOTER,
+			true, 0);
+	/*
+	 * cable could be removed during hard reset, remove its vote to
+	 * disable apsd
+	 */
+	vote(chg->apsd_disable_votable, PD_HARD_RESET_VOTER, false, 0);
 
 	chg->vconn_attempts = 0;
 	chg->otg_attempts = 0;
 	chg->pulse_cnt = 0;
 	chg->usb_icl_delta_ua = 0;
-	chg->voltage_min_uv = MICRO_5V;
-	chg->voltage_max_uv = MICRO_5V;
-	chg->pd_active = 0;
-	chg->pd_hard_reset = 0;
-	chg->typec_legacy_valid = false;
 
-	/* enable APSD CC trigger for next insertion */
-	rc = smblib_masked_write(chg, TYPE_C_CFG_REG,
-				APSD_START_ON_CC_BIT, APSD_START_ON_CC_BIT);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't enable APSD_START_ON_CC rc=%d\n", rc);
+	chg->usb_ever_removed = true;
 
-	if (chg->wa_flags & QC_AUTH_INTERRUPT_WA_BIT) {
-		/* re-enable AUTH_IRQ_EN_CFG_BIT */
-		rc = smblib_masked_write(chg,
-				USBIN_SOURCE_CHANGE_INTRPT_ENB_REG,
-				AUTH_IRQ_EN_CFG_BIT, AUTH_IRQ_EN_CFG_BIT);
-		if (rc < 0)
-			smblib_err(chg,
-				"Couldn't enable QC auth setting rc=%d\n", rc);
-	}
-
-	/* reconfigure allowed voltage for HVDCP */
-	rc = smblib_set_adapter_allowance(chg,
-			USBIN_ADAPTER_ALLOW_5V_OR_9V_TO_12V);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't set USBIN_ADAPTER_ALLOW_5V_OR_9V_TO_12V rc=%d\n",
-			rc);
-
-	/* enable DRP */
-	rc = smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
-				 TYPEC_POWER_ROLE_CMD_MASK, 0);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't enable DRP rc=%d\n", rc);
-
-	/* HW controlled CC_OUT */
-	rc = smblib_masked_write(chg, TAPER_TIMER_SEL_CFG_REG,
-							TYPEC_SPARE_CFG_BIT, 0);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't enable HW cc_out rc=%d\n", rc);
-
-	/* restore crude sensor */
-	rc = smblib_write(chg, TM_IO_DTEST4_SEL, 0xA5);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't restore crude sensor rc=%d\n", rc);
-
-	typec_sink_removal(chg);
 	smblib_update_usb_type(chg);
+
+	typec_source_removal(chg);
+	typec_sink_removal(chg);
 }
 
 static void smblib_handle_typec_insertion(struct smb_charger *chg,
-							bool sink_attached)
+		bool sink_attached, bool legacy_cable)
 {
-	int rc;
+	int rp;
+	bool vbus_cc_short = false;
+	bool valid_legacy_cable;
+#ifdef CONFIG_HTC_BATT
+	u8	reg;
+#endif //CONFIG_HTC_BATT
 
 	vote(chg->pd_disallowed_votable_indirect, CC_DETACHED_VOTER, false, 0);
 
-	/* disable APSD CC trigger since CC is attached */
-	rc = smblib_masked_write(chg, TYPE_C_CFG_REG, APSD_START_ON_CC_BIT, 0);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't disable APSD_START_ON_CC rc=%d\n",
-									rc);
-
-	if (sink_attached)
+	if (sink_attached) {
+		typec_source_removal(chg);
 		typec_sink_insertion(chg);
-	else
+	} else {
+		typec_source_insertion(chg);
 		typec_sink_removal(chg);
+	}
+
+	valid_legacy_cable = legacy_cable &&
+		(chg->usb_ever_removed || !smblib_sysok_reason_usbin(chg));
+	vote(chg->pd_disallowed_votable_indirect, LEGACY_CABLE_VOTER,
+			valid_legacy_cable, 0);
+
+	if (valid_legacy_cable) {
+		rp = smblib_get_prop_ufp_mode(chg);
+		if (rp == POWER_SUPPLY_TYPEC_SOURCE_HIGH
+				|| rp == POWER_SUPPLY_TYPEC_NON_COMPLIANT) {
+			vbus_cc_short = true;
+			smblib_err(chg, "Disabling PD and HVDCP, VBUS-CC shorted, rp = %d found\n",
+					rp);
+		}
+	}
+
+#ifdef CONFIG_HTC_BATT
+	smblib_read(chg, TYPE_C_STATUS_5_REG, &reg);
+	if (!(reg & TYPEC_LEGACY_CABLE_STATUS_BIT)){
+		smblib_dbg(chg, PR_INTERRUPT, "0x130F = 0x%02x, prepare to rerun APSD\n", reg);
+		schedule_delayed_work(&chg->cc_check_work, msecs_to_jiffies(10000));
+	}
+#endif //CONFIG_HTC_BATT
+
+	vote(chg->hvdcp_disable_votable_indirect, VBUS_CC_SHORT_VOTER,
+			vbus_cc_short, 0);
+	vote(chg->pd_disallowed_votable_indirect, VBUS_CC_SHORT_VOTER,
+			vbus_cc_short, 0);
 }
 
 static void smblib_handle_typec_debounce_done(struct smb_charger *chg,
-						bool rising, bool sink_attached)
+			bool rising, bool sink_attached, bool legacy_cable)
 {
 	int rc;
 	union power_supply_propval pval = {0, };
 
-	if (rising) {
-		if (!chg->typec_present) {
-			chg->typec_present = true;
-			smblib_dbg(chg, PR_MISC,  "TypeC insertion\n");
-			smblib_handle_typec_insertion(chg, sink_attached);
-		}
-	} else {
-		if (chg->typec_present) {
-			chg->typec_present = false;
-			smblib_dbg(chg, PR_MISC,  "TypeC removal\n");
-			smblib_handle_typec_removal(chg);
-		}
-	}
+	if (rising)
+		smblib_handle_typec_insertion(chg, sink_attached, legacy_cable);
+	else
+		smblib_handle_typec_removal(chg);
 
 	rc = smblib_get_prop_typec_mode(chg, &pval);
 	if (rc < 0)
 		smblib_err(chg, "Couldn't get prop typec mode rc=%d\n", rc);
 
+	/*
+	 * HW BUG - after cable is removed, medium or high rd reading
+	 * falls to std. Use it for signal of typec cc detachment in
+	 * software WA.
+	 */
+	if (chg->cc2_sink_detach_flag == CC2_SINK_MEDIUM_HIGH
+		&& pval.intval == POWER_SUPPLY_TYPEC_SOURCE_DEFAULT) {
+
+		chg->cc2_sink_detach_flag = CC2_SINK_WA_DONE;
+
+		rc = smblib_masked_write(chg,
+				TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
+				EXIT_SNK_BASED_ON_CC_BIT, 0);
+		if (rc < 0)
+			smblib_err(chg, "Couldn't get prop typec mode rc=%d\n",
+				rc);
+	}
+
+	nanohub_vbus_status(pval.intval);
+
 	smblib_dbg(chg, PR_INTERRUPT, "IRQ: debounce-done %s; Type-C %s detected\n",
 		   rising ? "rising" : "falling",
 		   smblib_typec_mode_name[pval.intval]);
-}
-
-static void smblib_usb_typec_change(struct smb_charger *chg)
-{
-	int rc;
-	bool debounce_done, sink_attached;
-
-	rc = smblib_multibyte_read(chg, TYPE_C_STATUS_1_REG,
-							chg->typec_status, 5);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't cache USB Type-C status rc=%d\n", rc);
-		return;
+#ifdef CONFIG_HTC_BATT
+	if (rising && (pval.intval == POWER_SUPPLY_TYPEC_NONE) && (g_cc_floating_cnt == 0)) {
+		if (!delayed_work_pending(&chg->cc_floating_chk_work))
+			schedule_delayed_work(&chg->cc_floating_chk_work, msecs_to_jiffies(3000));
 	}
 
-	debounce_done =
-		(bool)(chg->typec_status[3] & TYPEC_DEBOUNCE_DONE_STATUS_BIT);
-	sink_attached =
-		(bool)(chg->typec_status[3] & UFP_DFP_MODE_STATUS_BIT);
+	// Avoid CC mis-detect when HVDCP change vbus
+	if (chg->cc_first_det_sts == CC_DET_NONE) {
+		if (pval.intval == POWER_SUPPLY_TYPEC_SOURCE_DEFAULT)
+			chg->cc_first_det_sts = CC_DET_DEFAULT;
+		else if (pval.intval == POWER_SUPPLY_TYPEC_SOURCE_MEDIUM)
+			chg->cc_first_det_sts = CC_DET_MEDIUM;
+		else if (pval.intval == POWER_SUPPLY_TYPEC_SOURCE_HIGH)
+			chg->cc_first_det_sts = CC_DET_HIGH;
+	}
 
-	smblib_handle_typec_debounce_done(chg, debounce_done, sink_attached);
+	// Disable HVDCP for none 56K cable
+	if (rising && (chg->cc_first_det_sts != CC_DET_DEFAULT)){
+		vote(chg->hvdcp_disable_votable_indirect, VBUS_CC_SHORT_VOTER, true, 0);
+	}
 
-	if (chg->typec_status[3] & TYPEC_VBUS_ERROR_STATUS_BIT)
-		smblib_dbg(chg, PR_INTERRUPT, "IRQ: vbus-error\n");
+	if (rising && chg->cc_first_det_sts != CC_DET_DEFAULT) {
+		if (pval.intval == POWER_SUPPLY_TYPEC_SOURCE_MEDIUM) {
+			vote(chg->usb_icl_votable, PD_VOTER, true, USBIN_1500MA);
+			rerun_election(chg->usb_icl_votable);
+		} else if (pval.intval == POWER_SUPPLY_TYPEC_SOURCE_HIGH) {
+			vote(chg->usb_icl_votable, PD_VOTER, true, USBIN_3000MA);
+			rerun_election(chg->usb_icl_votable);
+		} else {
+			vote(chg->usb_icl_votable, PD_VOTER, false, USBIN_3000MA);
+			rerun_election(chg->usb_icl_votable);
+		}
+	}
+#endif
 
-	if (chg->typec_status[3] & TYPEC_VCONN_OVERCURR_STATUS_BIT)
-		schedule_work(&chg->vconn_oc_work);
+}
 
+irqreturn_t smblib_handle_usb_typec_change_for_uusb(struct smb_charger *chg)
+{
+	int rc;
+	u8 stat;
+
+	rc = smblib_read(chg, TYPE_C_STATUS_3_REG, &stat);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_3 rc=%d\n", rc);
+		return IRQ_HANDLED;
+	}
+	smblib_dbg(chg, PR_REGISTER, "TYPE_C_STATUS_3 = 0x%02x OTG=%d\n",
+		stat, !!(stat & (U_USB_GND_NOVBUS_BIT | U_USB_GND_BIT)));
+
+	extcon_set_cable_state_(chg->extcon, EXTCON_USB_HOST,
+			!!(stat & (U_USB_GND_NOVBUS_BIT | U_USB_GND_BIT)));
 	power_supply_changed(chg->usb_psy);
+
+	return IRQ_HANDLED;
 }
 
 irqreturn_t smblib_handle_usb_typec_change(int irq, void *data)
 {
 	struct smb_irq_data *irq_data = data;
 	struct smb_charger *chg = irq_data->parent_data;
+	int rc;
+	u8 stat4, stat5;
+	bool debounce_done, sink_attached, legacy_cable;
 
-	if (chg->micro_usb_mode) {
-		cancel_delayed_work_sync(&chg->uusb_otg_work);
-		vote(chg->awake_votable, OTG_DELAY_VOTER, true, 0);
-		smblib_dbg(chg, PR_INTERRUPT, "Scheduling OTG work\n");
-		schedule_delayed_work(&chg->uusb_otg_work,
-				msecs_to_jiffies(chg->otg_delay_ms));
+	if (chg->micro_usb_mode)
+		return smblib_handle_usb_typec_change_for_uusb(chg);
+
+	/* WA - not when PD hard_reset WIP on cc2 in sink mode */
+	if (chg->cc2_sink_detach_flag == CC2_SINK_STD)
+		return IRQ_HANDLED;
+
+	rc = smblib_read(chg, TYPE_C_STATUS_4_REG, &stat4);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_4 rc=%d\n", rc);
 		return IRQ_HANDLED;
 	}
 
-	if (chg->cc2_detach_wa_active || chg->typec_en_dis_active) {
-		smblib_dbg(chg, PR_INTERRUPT, "Ignoring since %s active\n",
-			chg->cc2_detach_wa_active ?
-			"cc2_detach_wa" : "typec_en_dis");
+	rc = smblib_read(chg, TYPE_C_STATUS_5_REG, &stat5);
+	if (rc < 0) {
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_5 rc=%d\n", rc);
 		return IRQ_HANDLED;
 	}
 
-	mutex_lock(&chg->lock);
-	smblib_usb_typec_change(chg);
-	mutex_unlock(&chg->lock);
+	debounce_done = (bool)(stat4 & TYPEC_DEBOUNCE_DONE_STATUS_BIT);
+	sink_attached = (bool)(stat4 & UFP_DFP_MODE_STATUS_BIT);
+	legacy_cable = (bool)(stat5 & TYPEC_LEGACY_CABLE_STATUS_BIT);
+
+	smblib_handle_typec_debounce_done(chg,
+			debounce_done, sink_attached, legacy_cable);
+
+	if (stat4 & TYPEC_VBUS_ERROR_STATUS_BIT)
+		smblib_dbg(chg, PR_INTERRUPT, "IRQ: %s vbus-error\n",
+			irq_data->name);
+
+	if (stat4 & TYPEC_VCONN_OVERCURR_STATUS_BIT)
+		schedule_work(&chg->vconn_oc_work);
+
+	power_supply_changed(chg->usb_psy);
+	smblib_dbg(chg, PR_REGISTER, "TYPE_C_STATUS_4 = 0x%02x\n", stat4);
+	smblib_dbg(chg, PR_REGISTER, "TYPE_C_STATUS_5 = 0x%02x\n", stat5);
 	return IRQ_HANDLED;
 }
 
@@ -3800,7 +4495,7 @@ irqreturn_t smblib_handle_switcher_power_ok(int irq, void *data)
 {
 	struct smb_irq_data *irq_data = data;
 	struct smb_charger *chg = irq_data->parent_data;
-	int rc, usb_icl;
+	int rc;
 	u8 stat;
 
 	if (!(chg->wa_flags & BOOST_BACK_WA))
@@ -3812,9 +4507,8 @@ irqreturn_t smblib_handle_switcher_power_ok(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
-	/* skip suspending input if its already suspended by some other voter */
-	usb_icl = get_effective_result(chg->usb_icl_votable);
-	if ((stat & USE_USBIN_BIT) && usb_icl >= 0 && usb_icl < USBIN_25MA)
+	if ((stat & USE_USBIN_BIT) &&
+			get_effective_result(chg->usb_icl_votable) < USBIN_25MA)
 		return IRQ_HANDLED;
 
 	if (stat & USE_DCIN_BIT)
@@ -3823,6 +4517,10 @@ irqreturn_t smblib_handle_switcher_power_ok(int irq, void *data)
 	if (is_storming(&irq_data->storm_data)) {
 		smblib_err(chg, "Reverse boost detected: voting 0mA to suspend input\n");
 		vote(chg->usb_icl_votable, BOOST_BACK_VOTER, true, 0);
+#ifdef CONFIG_HTC_BATT
+		schedule_delayed_work(&chg->reverse_boost_chk_work,
+				msecs_to_jiffies(1000));
+#endif // CONFIG_HTC_BATT
 	}
 
 	return IRQ_HANDLED;
@@ -3844,30 +4542,6 @@ irqreturn_t smblib_handle_wdog_bark(int irq, void *data)
 /***************
  * Work Queues *
  ***************/
-static void smblib_uusb_otg_work(struct work_struct *work)
-{
-	struct smb_charger *chg = container_of(work, struct smb_charger,
-						uusb_otg_work.work);
-	int rc;
-	u8 stat;
-	bool otg;
-
-	rc = smblib_read(chg, TYPE_C_STATUS_3_REG, &stat);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't read TYPE_C_STATUS_3 rc=%d\n", rc);
-		goto out;
-	}
-
-	otg = !!(stat & (U_USB_GND_NOVBUS_BIT | U_USB_GND_BIT));
-	extcon_set_cable_state_(chg->extcon, EXTCON_USB_HOST, otg);
-	smblib_dbg(chg, PR_REGISTER, "TYPE_C_STATUS_3 = 0x%02x OTG=%d\n",
-			stat, otg);
-	power_supply_changed(chg->usb_psy);
-
-out:
-	vote(chg->awake_votable, OTG_DELAY_VOTER, false, 0);
-}
-
 
 static void smblib_hvdcp_detect_work(struct work_struct *work)
 {
@@ -3876,7 +4550,12 @@ static void smblib_hvdcp_detect_work(struct work_struct *work)
 
 	vote(chg->pd_disallowed_votable_indirect, HVDCP_TIMEOUT_VOTER,
 				false, 0);
-	power_supply_changed(chg->usb_psy);
+	if (get_effective_result(chg->pd_disallowed_votable_indirect))
+		/* pd is still disabled, try hvdcp */
+		try_rerun_apsd_for_hvdcp(chg);
+	else
+		/* notify pd now that pd is allowed */
+		power_supply_changed(chg->usb_psy);
 }
 
 static void bms_update_work(struct work_struct *work)
@@ -3917,12 +4596,10 @@ static void clear_hdc_work(struct work_struct *work)
 static void rdstd_cc2_detach_work(struct work_struct *work)
 {
 	int rc;
-	u8 stat4, stat5;
+	u8 stat;
+	struct smb_irq_data irq_data = {NULL, "cc2-removal-workaround"};
 	struct smb_charger *chg = container_of(work, struct smb_charger,
 						rdstd_cc2_detach_work);
-
-	if (!chg->cc2_detach_wa_active)
-		return;
 
 	/*
 	 * WA steps -
@@ -3931,7 +4608,7 @@ static void rdstd_cc2_detach_work(struct work_struct *work)
 	 * 3. Removal detected if both TYPEC_DEBOUNCE_DONE_STATUS
 	 *    and TIMER_STAGE bits are gone, otherwise repeat all by
 	 *    work rescheduling.
-	 * Note, work will be cancelled when USB_PLUGIN rises.
+	 * Note, work will be cancelled when pd_hard_reset is 0.
 	 */
 
 	rc = smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
@@ -3954,40 +4631,399 @@ static void rdstd_cc2_detach_work(struct work_struct *work)
 
 	usleep_range(30000, 31000);
 
-	rc = smblib_read(chg, TYPE_C_STATUS_4_REG, &stat4);
+	rc = smblib_read(chg, TYPE_C_STATUS_4_REG, &stat);
 	if (rc < 0) {
-		smblib_err(chg, "Couldn't read TYPE_C_STATUS_4 rc=%d\n", rc);
+		smblib_err(chg, "Couldn't read TYPE_C_STATUS_4 rc=%d\n",
+			rc);
 		return;
 	}
+	if (stat & TYPEC_DEBOUNCE_DONE_STATUS_BIT)
+		goto rerun;
 
-	rc = smblib_read(chg, TYPE_C_STATUS_5_REG, &stat5);
+	rc = smblib_read(chg, TYPE_C_STATUS_5_REG, &stat);
 	if (rc < 0) {
 		smblib_err(chg,
 			"Couldn't read TYPE_C_STATUS_5_REG rc=%d\n", rc);
 		return;
 	}
-
-	if ((stat4 & TYPEC_DEBOUNCE_DONE_STATUS_BIT)
-			|| (stat5 & TIMER_STAGE_2_BIT)) {
-		smblib_dbg(chg, PR_MISC, "rerunning DD=%d TS2BIT=%d\n",
-				(int)(stat4 & TYPEC_DEBOUNCE_DONE_STATUS_BIT),
-				(int)(stat5 & TIMER_STAGE_2_BIT));
+	if (stat & TIMER_STAGE_2_BIT)
 		goto rerun;
-	}
 
-	smblib_dbg(chg, PR_MISC, "Bingo CC2 Removal detected\n");
-	chg->cc2_detach_wa_active = false;
-	rc = smblib_masked_write(chg, TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
-						EXIT_SNK_BASED_ON_CC_BIT, 0);
+	/* Bingo, cc2 removal detected */
 	smblib_reg_block_restore(chg, cc2_detach_settings);
-	mutex_lock(&chg->lock);
-	smblib_usb_typec_change(chg);
-	mutex_unlock(&chg->lock);
+	chg->cc2_sink_detach_flag = CC2_SINK_WA_DONE;
+	irq_data.parent_data = chg;
+	smblib_handle_usb_typec_change(0, &irq_data);
+
 	return;
 
 rerun:
 	schedule_work(&chg->rdstd_cc2_detach_work);
 }
+
+#ifdef CONFIG_HTC_BATT
+#define ICL_RECHK_DELAY_MS	1000
+#define RE_CHECK_MAX			3
+static void chk_usb_icl_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+					       chk_usb_icl_work.work);
+	int aicl_result;
+	u8 reg;
+	static int chk_cnt = 0;
+
+	if (chg->usb_psy_desc.type != POWER_SUPPLY_TYPE_USB_DCP)
+		return;
+
+	smblib_read(chg, AICL_STATUS_REG, &reg);
+
+	if ((reg & AICL_DONE_BIT) || (chk_cnt >= RE_CHECK_MAX)) {
+		smblib_get_charge_param(chg, &chg->param.icl_stat, &aicl_result);
+		if (aicl_result == USBIN_1500MA) {
+			// Start 5V/2A pre-check
+			htc_5v2a_pre_chk();
+			smblib_dbg(chg, PR_INTERRUPT, "AICL=%d, start pre-check\n", aicl_result/1000);
+		} else if (aicl_result < USBIN_1500MA) {
+			// Downgrade iusb to 1A
+			vote(chg->usb_icl_votable, USB_PSY_VOTER, true, USBIN_1000MA);
+			smblib_dbg(chg, PR_INTERRUPT, "AICL=%d, downgrade 1A\n", aicl_result/1000);
+		}
+		chk_cnt = 0;
+	} else {
+		chk_cnt++;
+		schedule_delayed_work(&chg->chk_usb_icl_work,
+				msecs_to_jiffies(ICL_RECHK_DELAY_MS));
+	}
+
+	return;
+}
+
+static void smblib_cc_check_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+											cc_check_work.work);
+	u8 reg;
+
+	if (chg->abnormal_cc_check_sts)
+		smblib_dbg(chg, PR_INTERRUPT, "cc-check done don't rerun APSD again\n");
+	else {
+		chg->abnormal_cc_check_sts = true;
+		smblib_read(chg, TYPE_C_STATUS_5_REG, &reg);
+		smblib_dbg(chg, PR_INTERRUPT, "re-check 0x130F = 0x%02x, RERUN APSD\n", reg);
+		smblib_rerun_apsd(chg);
+	}
+
+	return;
+}
+
+#define FLOAT_BOOST_MAX_CNT	10
+static void smblib_floating_chk_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+											floating_chk_work.work);
+	u8 apsd_result_sts;
+	u8 chgr_sts_8;
+	smblib_read(chg, APSD_RESULT_STATUS_REG, &apsd_result_sts);
+	smblib_read(chg, BATTERY_CHARGER_STATUS_8_REG, &chgr_sts_8);
+
+	switch (chg->float_chk_sts) {
+		case FLOAT_NONE:
+			if (chgr_sts_8 & PRE_TERM_BIT) {
+				chg->float_chk_cnt++;
+			}
+			chg->float_chk_sts = FLOAT_BOOST_CHECKING;
+			smblib_rerun_apsd(chg);
+			break;
+		case FLOAT_BOOST_CHECKING:
+			if (chgr_sts_8 & PRE_TERM_BIT) {
+				chg->float_chk_cnt++;
+				if (chg->float_chk_cnt >= FLOAT_BOOST_MAX_CNT) {
+					chg->float_chk_sts = FLOAT_BOOST_DETECTED;
+					htc_notify_unknown_charger(true);
+					chg->float_chk_cnt = 0;
+				}
+			}
+			smblib_rerun_apsd(chg);
+			break;
+		case FLOAT_CHECKING:
+			chg->float_chk_cnt = 0;
+			smblib_rerun_apsd(chg);
+			break;
+		default:
+			break;
+	}
+	smblib_dbg(chg, PR_INTERRUPT, "CHK_FLOATING:%d,cnt=%d,0x1308=0x%02x,0x100E=%02x\n",
+					chg->float_chk_sts, chg->float_chk_cnt, apsd_result_sts, chgr_sts_8);
+}
+
+static void smblib_boost_chk_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+						reverse_boost_chk_work.work);
+	u8 reg;
+	int rc = 0;
+
+	rc = smblib_read(chg, USBIN_BASE + INT_RT_STS_OFFSET, &reg);
+	if (rc) {
+		smblib_err(chg, "Failed to read USBIN_STS schedule re-check, rc=%d\n", rc);
+		schedule_delayed_work(&chg->reverse_boost_chk_work,
+				msecs_to_jiffies(1000));
+		return;
+	}
+
+	if (reg & USBIN_PLUGIN_RT_STS_BIT){
+		smblib_dbg(chg, PR_INTERRUPT, "USBIN_STS = 0x%02x, Vbus exist after reverse boost detected: resume input\n", reg);
+		vote(chg->usb_icl_votable, BOOST_BACK_VOTER, false, 0);
+	}
+
+	return;
+}
+
+static void smblib_cc_floating_chk_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+						cc_floating_chk_work.work);
+	int rc = 0, present = 0, type = 0;
+	union power_supply_propval ret = {0, };
+	u8 reg;
+
+	smblib_dbg(chg, PR_INTERRUPT, "[CC FLOAT]Start CC pin floating detection, cnt=%d\n", g_cc_floating_cnt);
+
+	if (g_cc_floating_cnt < 5) {
+		rc = power_supply_get_property(chg->usb_psy, POWER_SUPPLY_PROP_PRESENT, &ret);
+		if (rc)
+			smblib_err(chg, "Failed to read chg present rc=%d\n", rc);
+		else
+			present = ret.intval;
+		rc = power_supply_get_property(chg->usb_psy, POWER_SUPPLY_PROP_TYPE, &ret);
+		if (rc)
+			smblib_err(chg, "Failed to read chg type rc=%d\n", rc);
+		else
+			type = ret.intval;
+
+		if (present && type == 0) {
+			g_cc_floating_cnt += 1;
+			rc = smblib_masked_write(chg, TYPE_C_CFG_REG, TYPE_C_OR_U_USB_BIT, 0);
+			if (rc < 0)
+				dev_err(chg->dev, "Couldn't write register, rc=%d\n", rc);
+			msleep(50);
+			rc = smblib_masked_write(chg, TYPE_C_CFG_REG, TYPE_C_OR_U_USB_BIT, TYPE_C_OR_U_USB_BIT);
+			if (rc < 0)
+				dev_err(chg->dev, "Couldn't write register, rc=%d\n", rc);
+			else {
+				msleep(50);
+				smblib_rerun_apsd(chg);
+			}
+			schedule_delayed_work(&chg->cc_floating_chk_work, msecs_to_jiffies(3000));
+		} else if (present > 0)
+			g_cc_floating_cnt = 5;
+		else {
+			g_cc_floating_cnt = 0;
+			rc = smblib_read(chg, TYPE_C_CFG_REG, &reg);
+			if (rc < 0)
+				dev_err(chg->dev, "Couldn't read register, rc=%d\n", rc);
+			else if (reg & TYPE_C_OR_U_USB_BIT) {
+				rc = smblib_masked_write(chg, TYPE_C_CFG_REG, TYPE_C_OR_U_USB_BIT, 0);
+				if (rc < 0)
+					dev_err(chg->dev, "Couldn't write register, rc=%d\n", rc);
+			}
+		}
+
+		smblib_dbg(chg, PR_INTERRUPT, "[CC FLOAT]chg_present=%d, chg_type=%d, cnt=%d.\n",
+				present, type, g_cc_floating_cnt);
+	}
+}
+
+#define ICL_1500_MA_MAX_THRES	1700000
+#define ICL_1500_MA_MIN_THRES	1400000
+#define ICL_2000_MA_MAX_THRES	2200000
+#define ICL_2500_MA_MAX_THRES	2700000
+static void smblib_type_c_aicl_chk_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+						type_c_aicl_chk_work.work);
+	int rc = 0;
+	union power_supply_propval val = {0, };
+
+	rc = smblib_get_prop_input_current_settled(chg, &val);
+	if (rc) {
+		smblib_err(chg, "Failed to read AICL result, rc=%d\n", rc);
+		return;
+	}
+
+	if (val.intval < ICL_1500_MA_MIN_THRES) {
+		smblib_dbg(chg, PR_INTERRUPT, "[TYPEC]AICL=%d, DOWNGRADE 1A.\n",
+				val.intval/1000);
+		vote(chg->usb_icl_votable, PD_VOTER, true, USBIN_1000MA);
+	} else if (val.intval < ICL_1500_MA_MAX_THRES) {
+		smblib_dbg(chg, PR_INTERRUPT, "[TYPEC]AICL=%d, DOWNGRADE 1.5A.\n",
+				val.intval/1000);
+		vote(chg->usb_icl_votable, PD_VOTER, true, USBIN_1500MA);
+	} else if (val.intval < ICL_2000_MA_MAX_THRES) {
+		smblib_dbg(chg, PR_INTERRUPT, "[TYPEC]AICL=%d, DOWNGRADE 2A.\n",
+				val.intval/1000);
+		vote(chg->usb_icl_votable, PD_VOTER, true, USBIN_2000MA);
+	} else if (val.intval < ICL_2500_MA_MAX_THRES) {
+		smblib_dbg(chg, PR_INTERRUPT, "[TYPEC]AICL=%d, DOWNGRADE 2.5A.\n",
+				val.intval/1000);
+		vote(chg->usb_icl_votable, PD_VOTER, true, USBIN_2500MA);
+	}
+
+	return;
+}
+
+/***************
+ * HTC Battery *
+ ***************/
+
+//static struct smb2 *the_chip;
+int smblib_get_bat_fet_off(struct smb_charger *chg, int *suspend)
+{
+	int rc = 0;
+	u8 temp;
+
+	rc = smblib_read(chg, USBIN_CMD_IL_REG, &temp);
+	if (rc < 0) {
+		dev_err(chg->dev, "Couldn't read BAT_2_SYS_FET_DIS_BIT rc=%d\n", rc);
+		return rc;
+	}
+	*suspend = temp & BAT_2_SYS_FET_DIS_BIT;
+
+	return rc;
+}
+
+int smblib_set_bat_fet_off(struct smb_charger *chg, bool suspend)
+{
+	int rc = 0;
+
+	rc = smblib_masked_write(chg, USBIN_CMD_IL_REG, BAT_2_SYS_FET_DIS_BIT,
+			suspend ? BAT_2_SYS_FET_DIS_BIT : 0);
+	if (rc < 0)
+		dev_err(chg->dev, "Couldn't write %s to BAT_2_SYS_FET_DIS_BIT rc=%d\n",
+			suspend ? "suspend" : "resume", rc);
+
+	return rc;
+}
+
+void smblib_check_batt_enable(struct smb_charger *chg,
+					union power_supply_propval *val)
+{
+	union power_supply_propval pval = {0, };
+	smblib_get_bat_fet_off(chg, &pval.intval);
+	val->intval = !pval.intval;
+}
+
+void smblib_check_chg_enable(struct smb_charger *chg,
+					union power_supply_propval *val)
+{
+	union power_supply_propval pval = {0, };
+	smblib_get_usb_suspend(chg, &pval.intval);
+	val->intval = !pval.intval;
+}
+
+static int smblib_usb_conn_voltage_map_temp(int input, int *output)
+{
+        int i = 0;
+        const struct qpnp_vadc_map_pt *pts;
+        int tablesize;
+
+        pts  = usb_conn_temp_adc_map;
+        if (pts == NULL)
+                return -EINVAL;
+
+        tablesize = ARRAY_SIZE(usb_conn_temp_adc_map);
+
+        while (i < tablesize) {
+                if ((pts[i].y < input)) {
+                        /* table entry is less than measured
+                                value and table is descending, stop */
+                        break;
+                } else {
+                        i++;
+                }
+        }
+
+        if (i == 0) {
+                *output = pts[0].x;
+        } else if (i == tablesize) {
+                *output = pts[tablesize-1].x;
+        } else {
+                /* result is between search_index and search_index-1 */
+                /* interpolate linearly */
+                *output = (( ((pts[i].x - pts[i-1].x)*
+                        (input - pts[i-1].y))/
+                        (pts[i].y - pts[i-1].y))+
+                        pts[i-1].x);
+        }
+
+        return 0;
+}
+
+int smblib_get_usb_conn_adc(struct smb_charger *chg, struct qpnp_vadc_chip *vadc_dev,
+					unsigned int vadc_channel)
+{
+	int rc = 0;
+	struct qpnp_vadc_result results;
+
+	if(vadc_dev == 0)
+		return -EINVAL;
+
+	if (IS_ERR(vadc_dev)) {
+		vadc_dev = qpnp_get_vadc(chg->dev, "usb_conn_temp");
+	}
+
+	if (IS_ERR(vadc_dev)) {
+		dev_err(chg->dev,"Failed to get vadc_usb_conn_temp %ld\n", PTR_ERR(vadc_dev));
+		return -EINVAL;
+	}
+
+	if(vadc_dev) {
+		rc = qpnp_vadc_read(vadc_dev, vadc_channel, &results);
+		if (rc) {
+			dev_err(chg->dev,"Unable to read USB_CONN_TEMP rc=%d\n", rc);
+			return -EINVAL;
+		} else {
+			return (int)results.physical;
+		}
+	}
+
+	return -EINVAL;
+}
+
+int smblib_get_usb_conn_temp(struct smb_charger *chg, struct qpnp_vadc_chip *vadc_dev,
+					unsigned int vadc_channel, union power_supply_propval *val)
+{
+	int rc = 0;
+	int adc_val[3], usb_conn_adc, usb_conn_temp;
+	val->intval = 222;
+
+	adc_val[0] =  smblib_get_usb_conn_adc(chg, vadc_dev, vadc_channel);
+	if (adc_val[0] < 0)
+		return -EINVAL;
+
+	usleep_range(5000, 5100);
+
+	adc_val[1] =  smblib_get_usb_conn_adc(chg, vadc_dev, vadc_channel);
+	if (adc_val[1] < 0)
+		return -EINVAL;
+
+	usleep_range(5000, 5100);
+
+	adc_val[2] =  smblib_get_usb_conn_adc(chg, vadc_dev, vadc_channel);
+	if (adc_val[2] < 0)
+		return -EINVAL;
+
+	usb_conn_adc = (adc_val[0] + adc_val[1] + adc_val[2]) / 3000;
+	rc = smblib_usb_conn_voltage_map_temp(usb_conn_adc, &usb_conn_temp);
+	if(rc)
+		return -EINVAL;
+
+	val->intval = usb_conn_temp;
+
+	return rc;
+}
+
+#endif //CONFIG_HTC_BATT
 
 static void smblib_otg_oc_exit(struct smb_charger *chg, bool success)
 {
@@ -4004,6 +5040,19 @@ static void smblib_otg_oc_exit(struct smb_charger *chg, bool success)
 					QUICKSTART_OTG_FASTROLESWAP_BIT, 0);
 	if (rc < 0)
 		smblib_err(chg, "Couldn't enable VBUS < 1V check rc=%d\n", rc);
+
+	if (!chg->external_vconn && chg->vconn_en) {
+		chg->vconn_attempts = 0;
+		if (success) {
+			rc = _smblib_vconn_regulator_enable(
+							chg->vconn_vreg->rdev);
+			if (rc < 0)
+				smblib_err(chg, "Couldn't enable VCONN rc=%d\n",
+									rc);
+		} else {
+			chg->vconn_en = false;
+		}
+	}
 }
 
 #define MAX_OC_FALLING_TRIES 10
@@ -4085,14 +5134,11 @@ static void smblib_vconn_oc_work(struct work_struct *work)
 	int rc, i;
 	u8 stat;
 
-	if (chg->micro_usb_mode)
-		return;
-
 	smblib_err(chg, "over-current detected on VCONN\n");
 	if (!chg->vconn_vreg || !chg->vconn_vreg->rdev)
 		return;
 
-	mutex_lock(&chg->vconn_oc_lock);
+	mutex_lock(&chg->otg_oc_lock);
 	rc = _smblib_vconn_regulator_disable(chg->vconn_vreg->rdev);
 	if (rc < 0) {
 		smblib_err(chg, "Couldn't disable VCONN rc=%d\n", rc);
@@ -4112,7 +5158,11 @@ static void smblib_vconn_oc_work(struct work_struct *work)
 	 * minimize the delay when re-enabling OTG.
 	 */
 	for (i = 0; i < MAX_OC_FALLING_TRIES; ++i) {
+#ifdef CONFIG_HTC_USB
+		usleep_range(500, 550);
+#else
 		usleep_range(1000, 2000);
+#endif
 		rc = smblib_read(chg, TYPE_C_STATUS_4_REG, &stat);
 		if (rc >= 0 && !(stat & TYPEC_VCONN_OVERCURR_STATUS_BIT))
 			break;
@@ -4141,7 +5191,7 @@ static void smblib_vconn_oc_work(struct work_struct *work)
 	}
 
 unlock:
-	mutex_unlock(&chg->vconn_oc_lock);
+	mutex_unlock(&chg->otg_oc_lock);
 }
 
 static void smblib_otg_ss_done_work(struct work_struct *work)
@@ -4176,68 +5226,10 @@ static void smblib_icl_change_work(struct work_struct *work)
 	}
 
 	power_supply_changed(chg->usb_main_psy);
+	vote(chg->pl_enable_votable_indirect, USBIN_I_VOTER,
+				settled_ua >= USB_WEAK_INPUT_UA, 0);
 
 	smblib_dbg(chg, PR_INTERRUPT, "icl_settled=%d\n", settled_ua);
-}
-
-static void smblib_pl_enable_work(struct work_struct *work)
-{
-	struct smb_charger *chg = container_of(work, struct smb_charger,
-							pl_enable_work.work);
-
-	smblib_dbg(chg, PR_PARALLEL, "timer expired, enabling parallel\n");
-	vote(chg->pl_disable_votable, PL_DELAY_VOTER, false, 0);
-	vote(chg->awake_votable, PL_DELAY_VOTER, false, 0);
-}
-
-static void smblib_legacy_detection_work(struct work_struct *work)
-{
-	struct smb_charger *chg = container_of(work, struct smb_charger,
-							legacy_detection_work);
-	int rc;
-	u8 stat;
-	bool legacy, rp_high;
-
-	mutex_lock(&chg->lock);
-	chg->typec_en_dis_active = 1;
-	smblib_dbg(chg, PR_MISC, "running legacy unknown workaround\n");
-	rc = smblib_masked_write(chg,
-				TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
-				TYPEC_DISABLE_CMD_BIT,
-				TYPEC_DISABLE_CMD_BIT);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't disable type-c rc=%d\n", rc);
-
-	/* wait for the adapter to turn off VBUS */
-	msleep(500);
-
-	rc = smblib_masked_write(chg,
-				TYPE_C_INTRPT_ENB_SOFTWARE_CTRL_REG,
-				TYPEC_DISABLE_CMD_BIT, 0);
-	if (rc < 0)
-		smblib_err(chg, "Couldn't enable type-c rc=%d\n", rc);
-
-	/* wait for type-c detection to complete */
-	msleep(100);
-
-	rc = smblib_read(chg, TYPE_C_STATUS_5_REG, &stat);
-	if (rc < 0) {
-		smblib_err(chg, "Couldn't read typec stat5 rc = %d\n", rc);
-		goto unlock;
-	}
-
-	chg->typec_legacy_valid = true;
-	vote(chg->usb_icl_votable, LEGACY_UNKNOWN_VOTER, false, 0);
-	legacy = stat & TYPEC_LEGACY_CABLE_STATUS_BIT;
-	rp_high = smblib_get_prop_ufp_mode(chg) ==
-						POWER_SUPPLY_TYPEC_SOURCE_HIGH;
-	if (!legacy || !rp_high)
-		vote(chg->hvdcp_disable_votable_indirect, VBUS_CC_SHORT_VOTER,
-								false, 0);
-
-unlock:
-	chg->typec_en_dis_active = 0;
-	mutex_unlock(&chg->lock);
 }
 
 static int smblib_create_votables(struct smb_charger *chg)
@@ -4245,49 +5237,38 @@ static int smblib_create_votables(struct smb_charger *chg)
 	int rc = 0;
 
 	chg->fcc_votable = find_votable("FCC");
-	if (chg->fcc_votable == NULL) {
-		rc = -EINVAL;
-		smblib_err(chg, "Couldn't find FCC votable rc=%d\n", rc);
+	if (!chg->fcc_votable) {
+		rc = -EPROBE_DEFER;
 		return rc;
 	}
 
 	chg->fv_votable = find_votable("FV");
-	if (chg->fv_votable == NULL) {
-		rc = -EINVAL;
-		smblib_err(chg, "Couldn't find FV votable rc=%d\n", rc);
-		return rc;
-	}
-
-	chg->usb_icl_votable = find_votable("USB_ICL");
-	if (!chg->usb_icl_votable) {
-		rc = -EINVAL;
-		smblib_err(chg, "Couldn't find USB_ICL votable rc=%d\n", rc);
+	if (!chg->fv_votable) {
+		rc = -EPROBE_DEFER;
 		return rc;
 	}
 
 	chg->pl_disable_votable = find_votable("PL_DISABLE");
-	if (chg->pl_disable_votable == NULL) {
-		rc = -EINVAL;
-		smblib_err(chg, "Couldn't find votable PL_DISABLE rc=%d\n", rc);
+	if (!chg->pl_disable_votable) {
+		rc = -EPROBE_DEFER;
 		return rc;
 	}
-
-	chg->pl_enable_votable_indirect = find_votable("PL_ENABLE_INDIRECT");
-	if (chg->pl_enable_votable_indirect == NULL) {
-		rc = -EINVAL;
-		smblib_err(chg,
-			"Couldn't find votable PL_ENABLE_INDIRECT rc=%d\n",
-			rc);
-		return rc;
-	}
-
-	vote(chg->pl_disable_votable, PL_DELAY_VOTER, true, 0);
+	vote(chg->pl_disable_votable, PL_INDIRECT_VOTER, true, 0);
+	vote(chg->pl_disable_votable, PL_DELAY_HVDCP_VOTER, true, 0);
 
 	chg->dc_suspend_votable = create_votable("DC_SUSPEND", VOTE_SET_ANY,
 					smblib_dc_suspend_vote_callback,
 					chg);
 	if (IS_ERR(chg->dc_suspend_votable)) {
 		rc = PTR_ERR(chg->dc_suspend_votable);
+		return rc;
+	}
+
+	chg->usb_icl_votable = create_votable("USB_ICL", VOTE_MIN,
+					smblib_usb_icl_vote_callback,
+					chg);
+	if (IS_ERR(chg->usb_icl_votable)) {
+		rc = PTR_ERR(chg->usb_icl_votable);
 		return rc;
 	}
 
@@ -4330,6 +5311,14 @@ static int smblib_create_votables(struct smb_charger *chg)
 		return rc;
 	}
 
+	chg->pl_enable_votable_indirect = create_votable("PL_ENABLE_INDIRECT",
+					VOTE_SET_ANY,
+					smblib_pl_enable_indirect_vote_callback,
+					chg);
+	if (IS_ERR(chg->pl_enable_votable_indirect)) {
+		rc = PTR_ERR(chg->pl_enable_votable_indirect);
+		return rc;
+	}
 
 	chg->hvdcp_disable_votable_indirect = create_votable(
 				"HVDCP_DISABLE_INDIRECT",
@@ -4377,15 +5366,6 @@ static int smblib_create_votables(struct smb_charger *chg)
 		return rc;
 	}
 
-	chg->typec_irq_disable_votable = create_votable("TYPEC_IRQ_DISABLE",
-					VOTE_SET_ANY,
-					smblib_typec_irq_disable_vote_callback,
-					chg);
-	if (IS_ERR(chg->typec_irq_disable_votable)) {
-		rc = PTR_ERR(chg->typec_irq_disable_votable);
-		return rc;
-	}
-
 	return rc;
 }
 
@@ -4405,12 +5385,12 @@ static void smblib_destroy_votables(struct smb_charger *chg)
 		destroy_votable(chg->awake_votable);
 	if (chg->chg_disable_votable)
 		destroy_votable(chg->chg_disable_votable);
+	if (chg->pl_enable_votable_indirect)
+		destroy_votable(chg->pl_enable_votable_indirect);
 	if (chg->apsd_disable_votable)
 		destroy_votable(chg->apsd_disable_votable);
 	if (chg->hvdcp_hw_inov_dis_votable)
 		destroy_votable(chg->hvdcp_hw_inov_dis_votable);
-	if (chg->typec_irq_disable_votable)
-		destroy_votable(chg->typec_irq_disable_votable);
 }
 
 static void smblib_iio_deinit(struct smb_charger *chg)
@@ -4431,34 +5411,35 @@ int smblib_init(struct smb_charger *chg)
 {
 	int rc = 0;
 
-	mutex_init(&chg->lock);
 	mutex_init(&chg->write_lock);
 	mutex_init(&chg->otg_oc_lock);
-	mutex_init(&chg->vconn_oc_lock);
 	INIT_WORK(&chg->bms_update_work, bms_update_work);
 	INIT_WORK(&chg->rdstd_cc2_detach_work, rdstd_cc2_detach_work);
 	INIT_DELAYED_WORK(&chg->hvdcp_detect_work, smblib_hvdcp_detect_work);
 	INIT_DELAYED_WORK(&chg->step_soc_req_work, step_soc_req_work);
 	INIT_DELAYED_WORK(&chg->clear_hdc_work, clear_hdc_work);
+#ifdef CONFIG_HTC_BATT
+	INIT_DELAYED_WORK(&chg->chk_usb_icl_work, chk_usb_icl_work);
+	INIT_DELAYED_WORK(&chg->cc_check_work, smblib_cc_check_work);
+	INIT_DELAYED_WORK(&chg->floating_chk_work, smblib_floating_chk_work);
+	INIT_DELAYED_WORK(&chg->reverse_boost_chk_work, smblib_boost_chk_work);
+	INIT_DELAYED_WORK(&chg->cc_floating_chk_work, smblib_cc_floating_chk_work);
+	INIT_DELAYED_WORK(&chg->type_c_aicl_chk_work, smblib_type_c_aicl_chk_work);
+	chg->float_chk_sts = FLOAT_NONE;
+	chg->float_chk_cnt = 0;
+	chg->abnormal_cc_check_sts = false;
+	chg->cc_first_det_sts = CC_DET_NONE;
+#endif //CONFIG_HTC_BATT
 	INIT_WORK(&chg->otg_oc_work, smblib_otg_oc_work);
 	INIT_WORK(&chg->vconn_oc_work, smblib_vconn_oc_work);
 	INIT_DELAYED_WORK(&chg->otg_ss_done_work, smblib_otg_ss_done_work);
 	INIT_DELAYED_WORK(&chg->icl_change_work, smblib_icl_change_work);
-	INIT_DELAYED_WORK(&chg->pl_enable_work, smblib_pl_enable_work);
-	INIT_WORK(&chg->legacy_detection_work, smblib_legacy_detection_work);
-	INIT_DELAYED_WORK(&chg->uusb_otg_work, smblib_uusb_otg_work);
 	chg->fake_capacity = -EINVAL;
-	chg->fake_input_current_limited = -EINVAL;
 
 	switch (chg->mode) {
 	case PARALLEL_MASTER:
-		rc = qcom_batt_init();
-		if (rc < 0) {
-			smblib_err(chg, "Couldn't init qcom_batt_init rc=%d\n",
-				rc);
-			return rc;
-		}
-
+		chg->qnovo_fcc_ua = -EINVAL;
+		chg->qnovo_fv_uv = -EINVAL;
 		rc = smblib_create_votables(chg);
 		if (rc < 0) {
 			smblib_err(chg, "Couldn't create votables rc=%d\n",
@@ -4471,6 +5452,12 @@ int smblib_init(struct smb_charger *chg)
 			smblib_err(chg,
 				"Couldn't register notifier rc=%d\n", rc);
 			return rc;
+		}
+
+		chg->ext_power = devm_regulator_get(chg->dev, "ext_power");
+		if (IS_ERR(chg->ext_power)) {
+			rc = PTR_ERR(chg->ext_power);
+			smblib_err(chg, "Couldn't get external TPS61099 regulator, rc=%d\n", rc);
 		}
 
 		chg->bms_psy = power_supply_get_by_name("bms");
@@ -4490,21 +5477,8 @@ int smblib_deinit(struct smb_charger *chg)
 {
 	switch (chg->mode) {
 	case PARALLEL_MASTER:
-		cancel_work_sync(&chg->bms_update_work);
-		cancel_work_sync(&chg->rdstd_cc2_detach_work);
-		cancel_delayed_work_sync(&chg->hvdcp_detect_work);
-		cancel_delayed_work_sync(&chg->step_soc_req_work);
-		cancel_delayed_work_sync(&chg->clear_hdc_work);
-		cancel_work_sync(&chg->otg_oc_work);
-		cancel_work_sync(&chg->vconn_oc_work);
-		cancel_delayed_work_sync(&chg->otg_ss_done_work);
-		cancel_delayed_work_sync(&chg->icl_change_work);
-		cancel_delayed_work_sync(&chg->pl_enable_work);
-		cancel_work_sync(&chg->legacy_detection_work);
-		cancel_delayed_work_sync(&chg->uusb_otg_work);
 		power_supply_unreg_notifier(&chg->nb);
 		smblib_destroy_votables(chg);
-		qcom_batt_deinit();
 		break;
 	case PARALLEL_SLAVE:
 		break;

@@ -77,7 +77,6 @@ enum kgsl_event_results {
 	{ KGSL_CONTEXT_PER_CONTEXT_TS, "PER_CONTEXT_TS" }, \
 	{ KGSL_CONTEXT_USER_GENERATED_TS, "USER_TS" }, \
 	{ KGSL_CONTEXT_NO_FAULT_TOLERANCE, "NO_FT" }, \
-	{ KGSL_CONTEXT_INVALIDATE_ON_FAULT, "INVALIDATE_ON_FAULT" }, \
 	{ KGSL_CONTEXT_PWR_CONSTRAINT, "PWR" }, \
 	{ KGSL_CONTEXT_SAVE_GMEM, "SAVE_GMEM" }
 
@@ -167,10 +166,9 @@ struct kgsl_functable {
 		unsigned int prelevel, unsigned int postlevel, bool post);
 	void (*regulator_disable_poll)(struct kgsl_device *device);
 	void (*clk_set_options)(struct kgsl_device *device,
-		const char *name, struct clk *clk, bool on);
+		const char *name, struct clk *clk);
 	void (*gpu_model)(struct kgsl_device *device, char *str,
 		size_t bufsz);
-	void (*stop_fault_timer)(struct kgsl_device *device);
 };
 
 struct kgsl_ioctl {
@@ -303,6 +301,9 @@ struct kgsl_device {
 	/* Number of active contexts seen globally for this device */
 	int active_context_count;
 	struct kobject *gpu_sysfs_kobj;
+
+	/* used to switch htc decision for gpu fault */
+	int gpu_fault_no_panic;
 };
 
 #define KGSL_MMU_DEVICE(_mmu) \
@@ -425,7 +426,7 @@ struct kgsl_process_private {
 	struct kobject kobj;
 	struct dentry *debug_root;
 	struct {
-		uint64_t cur;
+		atomic_long_t cur;
 		uint64_t max;
 	} stats[KGSL_MEM_ENTRY_MAX];
 	struct idr syncsource_idr;
@@ -513,9 +514,22 @@ struct kgsl_device *kgsl_get_device(int dev_idx);
 static inline void kgsl_process_add_stats(struct kgsl_process_private *priv,
 	unsigned int type, uint64_t size)
 {
-	priv->stats[type].cur += size;
-	if (priv->stats[type].max < priv->stats[type].cur)
-		priv->stats[type].max = priv->stats[type].cur;
+	uint64_t cur;
+	if (type >= KGSL_MEM_ENTRY_MAX)
+		return;
+
+	spin_lock(&priv->mem_lock);
+	atomic_long_add(size, &priv->stats[type].cur);
+	cur = atomic_long_read(&priv->stats[type].cur);
+	if (priv->stats[type].max < cur)
+		priv->stats[type].max = cur;
+	spin_unlock(&priv->mem_lock);
+}
+
+static inline void kgsl_process_sub_stats(struct kgsl_process_private *priv,
+		unsigned int type, size_t size)
+{
+	atomic_long_sub(size, &priv->stats[type].cur);
 }
 
 static inline void kgsl_regread(struct kgsl_device *device,

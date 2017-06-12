@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -42,15 +42,6 @@
 
 &ufs1 {
 	status = "ok";
-};
-
-&spi_0 {
-	spi_codec@0 {
-		compatible = "qcom,spi-msm-codec-slave";
-		reg = <0>;
-		spi-max-frequency = <2000000>;
-		spi-cpha;
-	};
 };
 
 &uartblsp2dm1 {
@@ -454,27 +445,6 @@
 };
 
 &soc {
-	ntn1: ntn_avb@1 { /* Neutrno device on RC1*/
-		compatible = "qcom,ntn_avb";
-
-		ntn-rst-gpio = <&pm8994_gpios 13 0>;
-
-		vdd-ntn-hsic-supply = <&pm8994_l25>;
-		vdd-ntn-pci-supply = <&pm8994_s4>;
-		vdd-ntn-io-supply = <&pm8994_s4>;
-
-		qcom,ntn-rst-delay-msec = <100>;
-		qcom,ntn-rc-num = <1>;
-		qcom,ntn-bus-num = <1>;
-	};
-
-	ntn2: ntn_avb@2 { /*Neutrino device on RC2*/
-		compatible = "qcom,ntn_avb";
-		qcom,ntn-rst-delay-msec = <100>;
-		qcom,ntn-rc-num = <2>;
-		qcom,ntn-bus-num = <1>;
-	};
-
 	i2c@75ba000 {
 		synaptics@20 {
 			compatible = "synaptics,dsx";
@@ -639,50 +609,42 @@
 
 		asoc-platform = <&pcm0>, <&pcm1>, <&pcm2>, <&voip>, <&voice>,
 				<&loopback>, <&compress>, <&hostless>,
-				<&afe>, <&lsm>, <&routing>, <&compr>,
-				<&loopback1>;
+				<&afe>, <&lsm>, <&routing>, <&compr>;
 		asoc-platform-names = "msm-pcm-dsp.0", "msm-pcm-dsp.1",
 				"msm-pcm-dsp.2", "msm-voip-dsp",
 				"msm-pcm-voice", "msm-pcm-loopback",
 				"msm-compress-dsp", "msm-pcm-hostless",
 				"msm-pcm-afe", "msm-lsm-client",
-				"msm-pcm-routing", "msm-compr-dsp",
-				"msm-pcm-loopback.1";
+				"msm-pcm-routing", "msm-compr-dsp";
 		asoc-cpu = <&dai_pri_auxpcm>, <&dai_sec_auxpcm>, <&dai_hdmi>,
-				<&dai_mi2s_sec>, <&dai_mi2s>, <&dai_mi2s_quat>,
+				<&dai_mi2s>, <&dai_mi2s_quat>,
 				<&afe_pcm_rx>, <&afe_pcm_tx>,
 				<&afe_proxy_rx>, <&afe_proxy_tx>,
 				<&incall_record_rx>, <&incall_record_tx>,
 				<&incall_music_rx>, <&incall_music2_rx>,
-				<&dai_sec_tdm_tx_0>, <&dai_sec_tdm_tx_1>,
-				<&dai_sec_tdm_tx_2>, <&dai_sec_tdm_tx_3>,
 				<&dai_tert_tdm_rx_0>, <&dai_tert_tdm_rx_1>,
 				<&dai_tert_tdm_rx_2>, <&dai_tert_tdm_rx_3>,
-				<&dai_tert_tdm_rx_4>, <&dai_tert_tdm_tx_0>,
-				<&dai_tert_tdm_tx_1>, <&dai_tert_tdm_tx_2>,
-				<&dai_tert_tdm_tx_3>, <&dai_quat_tdm_rx_0>,
-				<&dai_quat_tdm_rx_1>, <&dai_quat_tdm_rx_2>,
-				<&dai_quat_tdm_rx_3>, <&dai_quat_tdm_tx_0>,
-				<&dai_quat_tdm_tx_1>, <&dai_quat_tdm_tx_2>,
-				<&dai_quat_tdm_tx_3>;
+				<&dai_tert_tdm_tx_0>, <&dai_tert_tdm_tx_1>,
+				<&dai_tert_tdm_tx_2>, <&dai_tert_tdm_tx_3>,
+				<&dai_quat_tdm_rx_0>, <&dai_quat_tdm_rx_1>,
+				<&dai_quat_tdm_rx_2>, <&dai_quat_tdm_rx_3>,
+				<&dai_quat_tdm_tx_0>, <&dai_quat_tdm_tx_1>,
+				<&dai_quat_tdm_tx_2>, <&dai_quat_tdm_tx_3>;
 		asoc-cpu-names = "msm-dai-q6-auxpcm.1", "msm-dai-q6-auxpcm.2",
-				"msm-dai-q6-hdmi.8", "msm-dai-q6-mi2s.1",
+				"msm-dai-q6-hdmi.8",
 				"msm-dai-q6-mi2s.2", "msm-dai-q6-mi2s.3",
 				"msm-dai-q6-dev.224", "msm-dai-q6-dev.225",
 				"msm-dai-q6-dev.241", "msm-dai-q6-dev.240",
 				"msm-dai-q6-dev.32771", "msm-dai-q6-dev.32772",
 				"msm-dai-q6-dev.32773", "msm-dai-q6-dev.32770",
-				"msm-dai-q6-tdm.36881", "msm-dai-q6-tdm.36883",
-				"msm-dai-q6-tdm.36885", "msm-dai-q6-tdm.36887",
 				"msm-dai-q6-tdm.36896", "msm-dai-q6-tdm.36898",
 				"msm-dai-q6-tdm.36900", "msm-dai-q6-tdm.36902",
-				"msm-dai-q6-tdm.36904", "msm-dai-q6-tdm.36897",
-				"msm-dai-q6-tdm.36899", "msm-dai-q6-tdm.36901",
-				"msm-dai-q6-tdm.36903", "msm-dai-q6-tdm.36912",
-				"msm-dai-q6-tdm.36914", "msm-dai-q6-tdm.36916",
-				"msm-dai-q6-tdm.36918", "msm-dai-q6-tdm.36913",
-				"msm-dai-q6-tdm.36915", "msm-dai-q6-tdm.36917",
-				"msm-dai-q6-tdm.36919";
+				"msm-dai-q6-tdm.36897", "msm-dai-q6-tdm.36899",
+				"msm-dai-q6-tdm.36901", "msm-dai-q6-tdm.36903",
+				"msm-dai-q6-tdm.36912", "msm-dai-q6-tdm.36914",
+				"msm-dai-q6-tdm.36916", "msm-dai-q6-tdm.36918",
+				"msm-dai-q6-tdm.36913", "msm-dai-q6-tdm.36915",
+				"msm-dai-q6-tdm.36917", "msm-dai-q6-tdm.36919";
 		asoc-codec = <&stub_codec>;
 		asoc-codec-names = "msm-stub-codec.1";
 	};
@@ -692,11 +654,6 @@
 		interrupt-parent = <&spmi_bus>;
 		interrupts = <0x0 0xd0 0x0>;  /* PM8994 GPIO17 */
 		interrupt-names = "vbus_det_irq";
-	};
-
-	loopback1: qcom,msm-pcm-loopback-low-latency {
-		compatible = "qcom,msm-pcm-loopback";
-		qcom,msm-pcm-loopback-low-latency;
 	};
 
 	usb_vbus_vreg: usb_vbus_vreg {
@@ -715,27 +672,11 @@
 	};
 
 	qcom,msm-dai-mi2s {
-		dai_mi2s_sec: qcom,msm-dai-q6-mi2s-sec {
-			qcom,msm-mi2s-rx-lines = <2>;
-			qcom,msm-mi2s-tx-lines = <1>;
-			pinctrl-names = "default", "sleep";
-			pinctrl-0 = <&sec_mi2s_active &sec_mi2s_sd0_active
-				&sec_mi2s_sd1_active>;
-			pinctrl-1 = <&sec_mi2s_sleep &sec_mi2s_sd0_sleep
-				&sec_mi2s_sd1_sleep>;
-		};
-
 		dai_mi2s_quat: qcom,msm-dai-q6-mi2s-quat {
 			pinctrl-names = "default", "sleep";
 			pinctrl-0 = <&quat_mi2s_active &quat_mi2s_sd0_active>;
 			pinctrl-1 = <&quat_mi2s_sleep &quat_mi2s_sd0_sleep>;
 		};
-	};
-
-	qcom,msm-dai-tdm-tert-rx {
-		pinctrl-names = "default", "sleep";
-		pinctrl-0 = <&tert_tdm_dout_active>;
-		pinctrl-1 = <&tert_tdm_dout_sleep>;
 	};
 
 	qcom,msm-dai-tdm-quat-rx {
@@ -828,14 +769,14 @@
 		status = "okay";
 	};
 
-	gpio@cc00 { /* GPIO 13 - NTN_RST */
-		qcom,mode = <1>; /* DIGITAL OUT */
-		qcom,output-type = <0>; /* CMOS logic */
+	gpio@cc00 { /* GPIO 13 - HPH_EN0 */
+		qcom,mode = <1>;
+		qcom,output-type = <0>;
 		qcom,pull = <5>;
-		qcom,vin-sel = <2>; /* 1.8 */
+		qcom,vin-sel = <2>;
 		qcom,out-strength = <1>;
-		qcom,src-sel = <0>; /* GPIO */
-		qcom,master-en = <1>; /* Enable GPIO */
+		qcom,src-sel = <2>;
+		qcom,master-en = <1>;
 		status = "okay";
 	};
 
@@ -969,10 +910,6 @@
 	};
 };
 
-&slim_msm {
-	status = "disabled";
-};
-
 /delete-node/  &led_flash0;
 
 &mdss_dsi0 {
@@ -1002,20 +939,7 @@
 	/delete-property/ vin-supply;
 };
 
-&pcie0 {
-	/delete-property/ qcom,l1-supported;
-	/delete-property/ qcom,l1ss-supported;
-	/delete-property/ qcom,aux-clk-sync;
-};
-
 &pcie1 {
-	qcom,msi-gicm-addr = <0x09BD0040>;
-	qcom,msi-gicm-base = <0x240>;
-
-	/delete-property/ qcom,boot-option;
-	/delete-property/ qcom,l1-supported;
-	/delete-property/ qcom,l1ss-supported;
-	/delete-property/ qcom,aux-clk-sync;
 	/delete-property/ qcom,ep-wakeirq;
 };
 
@@ -1023,10 +947,6 @@
 	perst-gpio = <&tlmm 90 0>;
 	wake-gpio = <&tlmm 54 0>;
 
-	/delete-property/ qcom,boot-option;
-	/delete-property/ qcom,l1-supported;
-	/delete-property/ qcom,l1ss-supported;
-	/delete-property/ qcom,aux-clk-sync;
 	/delete-property/ qcom,ep-wakeirq;
 };
 
@@ -1046,4 +966,87 @@
 	/delete-property/ qcom,spkr-sd-n-gpio;
 };
 
+&hl7509_en_vreg {
+	status = "ok";
+};
 
+&hl7509_vreg {
+	status = "ok";
+};
+
+&gfx_cpr {
+	vdd-supply = <&hl7509_vreg>;
+	qcom,cpr-step-quot-init-min = <20>;
+	qcom,cpr-step-quot-init-max = <26>;
+	qcom,voltage-step = <10000>;
+	/delete-property/ qcom,cpr-enable;
+};
+
+&gfx_vreg {
+	qcom,cpr-voltage-ceiling =
+		<600000  670000  670000  750000  830000
+		 910000  960000 1020000>;
+	qcom,cpr-voltage-floor =
+		<600000  600000  600000  600000  600000
+		 600000  600000  600000>;
+};
+
+&pm8994_l3 {
+	regulator-min-microvolt = <875000>;
+	regulator-max-microvolt = <875000>;
+	qcom,init-voltage = <875000>;
+};
+
+&pm8994_l11 {
+	regulator-min-microvolt = <850000>;
+	regulator-max-microvolt = <850000>;
+	qcom,init-voltage = <850000>;
+};
+
+&pm8994_l17 {
+	regulator-min-microvolt = <1800000>;
+	regulator-max-microvolt = <1800000>;
+	qcom,init-voltage = <1800000>;
+};
+
+&pm8994_l23 {
+	regulator-min-microvolt = <1100000>;
+	regulator-max-microvolt = <1100000>;
+	qcom,init-voltage = <1100000>;
+};
+
+&pm8994_l27 {
+	regulator-min-microvolt = <800000>;
+	regulator-max-microvolt = <800000>;
+	qcom,init-voltage = <800000>;
+};
+
+&pm8994_l29 {
+	regulator-min-microvolt = <2500000>;
+	regulator-max-microvolt = <2500000>;
+	qcom,init-voltage = <2500000>;
+};
+
+&rpm_bus {
+	rpm-regulator-ldoa26 {
+		/delete-node/ pm8994_l26_corner;
+		/delete-node/ pm8994_l26_floor_corner;
+
+		pm8994_l26: regulator-l26 {
+			regulator-min-microvolt = <1100000>;
+			regulator-max-microvolt = <1100000>;
+			qcom,init-voltage = <1100000>;
+			status = "okay";
+		};
+	};
+
+	rpm-regulator-ldoa31 {
+		status = "okay";
+		pm8994_l31: regulator-l31 {
+			regulator-min-microvolt = <1100000>;
+			regulator-max-microvolt = <1100000>;
+			qcom,init-voltage = <1100000>;
+			status = "okay";
+		};
+	};
+};

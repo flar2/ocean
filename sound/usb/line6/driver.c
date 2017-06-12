@@ -29,7 +29,7 @@
 /*
 	This is Line 6's MIDI manufacturer ID.
 */
-const unsigned char line6_midi_id[3] = {
+const unsigned char line6_midi_id[] = {
 	0x00, 0x01, 0x0c
 };
 EXPORT_SYMBOL_GPL(line6_midi_id);

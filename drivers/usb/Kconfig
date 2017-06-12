@@ -153,6 +153,10 @@ source "drivers/usb/phy/Kconfig"
 
 source "drivers/usb/gadget/Kconfig"
 
+source "drivers/usb/tusb1044/Kconfig"
+
+source "drivers/usb/tps61099/Kconfig"
+
 config USB_LED_TRIG
 	bool "USB LED Triggers"
 	depends on LEDS_CLASS && USB_COMMON && LEDS_TRIGGERS

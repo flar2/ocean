@@ -185,17 +185,10 @@ void cpu_hotplug_disable(void)
 }
 EXPORT_SYMBOL_GPL(cpu_hotplug_disable);
 
-static void __cpu_hotplug_enable(void)
-{
-	if (WARN_ONCE(!cpu_hotplug_disabled, "Unbalanced cpu hotplug enable\n"))
-		return;
-	cpu_hotplug_disabled--;
-}
-
 void cpu_hotplug_enable(void)
 {
 	cpu_maps_update_begin();
-	__cpu_hotplug_enable();
+	WARN_ON(--cpu_hotplug_disabled < 0);
 	cpu_maps_update_done();
 }
 EXPORT_SYMBOL_GPL(cpu_hotplug_enable);
@@ -232,6 +225,12 @@ static int cpu_notify(unsigned long val, void *v)
 	return __cpu_notify(val, v, -1, NULL);
 }
 
+#ifdef CONFIG_HOTPLUG_CPU
+
+static void cpu_notify_nofail(unsigned long val, void *v)
+{
+	BUG_ON(cpu_notify(val, v));
+}
 EXPORT_SYMBOL(register_cpu_notifier);
 EXPORT_SYMBOL(__register_cpu_notifier);
 
@@ -248,12 +247,6 @@ void __unregister_cpu_notifier(struct notifier_block *nb)
 	raw_notifier_chain_unregister(&cpu_chain, nb);
 }
 EXPORT_SYMBOL(__unregister_cpu_notifier);
-
-#ifdef CONFIG_HOTPLUG_CPU
-static void cpu_notify_nofail(unsigned long val, void *v)
-{
-	BUG_ON(cpu_notify(val, v));
-}
 
 /**
  * clear_tasks_mm_cpumask - Safely clear tasks' mm_cpumask for a CPU
@@ -530,41 +523,9 @@ out:
 	return ret;
 }
 
-static int switch_to_rt_policy(void)
-{
-	struct sched_param param = { .sched_priority = MAX_RT_PRIO - 1 };
-	unsigned int policy = current->policy;
-	int err;
-
-	/* Nobody should be attempting hotplug from these policy contexts. */
-	if (policy == SCHED_BATCH || policy == SCHED_IDLE ||
-					policy == SCHED_DEADLINE)
-		return -EPERM;
-
-	if (policy == SCHED_FIFO || policy == SCHED_RR)
-		return 1;
-
-	/* Only SCHED_NORMAL left. */
-	err = sched_setscheduler_nocheck(current, SCHED_FIFO, &param);
-	return err;
-
-}
-
-static int switch_to_fair_policy(void)
-{
-	struct sched_param param = { .sched_priority = 0 };
-
-	return sched_setscheduler_nocheck(current, SCHED_NORMAL, &param);
-}
-
 int cpu_up(unsigned int cpu)
 {
 	int err = 0;
-	int switch_err = 0;
-
-	switch_err = switch_to_rt_policy();
-	if (switch_err < 0)
-		return switch_err;
 
 	if (!cpu_possible(cpu)) {
 		pr_err("can't online cpu %d because it is not configured as may-hotadd at boot time\n",
@@ -590,14 +551,6 @@ int cpu_up(unsigned int cpu)
 
 out:
 	cpu_maps_update_done();
-
-	if (!switch_err) {
-		switch_err = switch_to_fair_policy();
-		if (switch_err)
-			pr_err("Hotplug policy switch err=%d Task %s pid=%d\n",
-				switch_err, current->comm, current->pid);
-	}
-
 	return err;
 }
 EXPORT_SYMBOL_GPL(cpu_up);
@@ -663,7 +616,7 @@ void enable_nonboot_cpus(void)
 
 	/* Allow everyone to use the CPU hotplug again */
 	cpu_maps_update_begin();
-	__cpu_hotplug_enable();
+	WARN_ON(--cpu_hotplug_disabled < 0);
 	if (cpumask_empty(frozen_cpus))
 		goto out;
 

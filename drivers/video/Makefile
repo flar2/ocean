@@ -1,5 +1,6 @@
 obj-$(CONFIG_VGASTATE)            += vgastate.o
 obj-$(CONFIG_HDMI)                += hdmi.o
+obj-$(CONFIG_FB_MINIFB)           += minifb.o
 
 obj-$(CONFIG_ADF)		  += adf/
 obj-$(CONFIG_VT)		  += console/

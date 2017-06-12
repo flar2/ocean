@@ -1042,7 +1042,7 @@ static int print_wakeup_source_stats(struct seq_file *m,
 		active_time = ktime_set(0, 0);
 	}
 
-	seq_printf(m, "%-32s\t%lu\t\t%lu\t\t%lu\t\t%lu\t\t%lld\t\t%lld\t\t%lld\t\t%lld\t\t%lld\n",
+	seq_printf(m, "%-12s\t%lu\t\t%lu\t\t%lu\t\t%lu\t\t%lld\t\t%lld\t\t%lld\t\t%lld\t\t%lld\n",
 		   ws->name, active_count, ws->event_count,
 		   ws->wakeup_count, ws->expire_count,
 		   ktime_to_ms(active_time), ktime_to_ms(total_time),
@@ -1054,6 +1054,32 @@ static int print_wakeup_source_stats(struct seq_file *m,
 	return 0;
 }
 
+#ifdef CONFIG_HTC_POWER_DEBUG
+void htc_print_wakeup_source(struct wakeup_source *ws)
+{
+        if (ws->active) {
+                if (ws->timer_expires) {
+                        long timeout = ws->timer_expires - jiffies;
+                        if (timeout > 0)
+                                printk(" '%s', time left %ld ticks; ", ws->name, timeout);
+                } else
+                        printk(" '%s' ", ws->name);
+        }
+}
+
+void htc_print_active_wakeup_sources(void)
+{
+        struct wakeup_source *ws;
+
+        printk("wakeup sources: ");
+        rcu_read_lock();
+        list_for_each_entry_rcu(ws, &wakeup_sources, entry)
+                htc_print_wakeup_source(ws);
+        rcu_read_unlock();
+        printk("\n");
+}
+#endif
+
 /**
  * wakeup_sources_stats_show - Print wakeup sources statistics information.
  * @m: seq_file to print the statistics into.
@@ -1062,7 +1088,7 @@ static int wakeup_sources_stats_show(struct seq_file *m, void *unused)
 {
 	struct wakeup_source *ws;
 
-	seq_puts(m, "name\t\t\t\t\tactive_count\tevent_count\twakeup_count\t"
+	seq_puts(m, "name\t\tactive_count\tevent_count\twakeup_count\t"
 		"expire_count\tactive_since\ttotal_time\tmax_time\t"
 		"last_change\tprevent_suspend_time\n");
 

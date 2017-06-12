@@ -48,12 +48,6 @@
 
 #define BUF_POOL_SIZE 32
 
-#define DFPS_DATA_MAX_HFP 8192
-#define DFPS_DATA_MAX_HBP 8192
-#define DFPS_DATA_MAX_HPW 8192
-#define DFPS_DATA_MAX_FPS 0x7fffffff
-#define DFPS_DATA_MAX_CLK_RATE 250000
-
 static int mdss_mdp_overlay_free_fb_pipe(struct msm_fb_data_type *mfd);
 static int mdss_mdp_overlay_fb_parse_dt(struct msm_fb_data_type *mfd);
 static int mdss_mdp_overlay_off(struct msm_fb_data_type *mfd);
@@ -525,16 +519,16 @@ static int __mdss_mdp_validate_pxl_extn(struct mdss_mdp_pipe *pipe)
 
 	return 0;
 }
-
 static int __mdss_mdp_validate_qseed3_cfg(struct mdss_mdp_pipe *pipe)
 {
 	int plane;
 
 	for (plane = 0; plane < MAX_PLANES; plane++) {
 		u32 hor_req_pixels, hor_fetch_pixels;
+		u32 hor_ov_fetch, vert_ov_fetch;
 		u32 vert_req_pixels, vert_fetch_pixels;
-		u32 src_w = pipe->src.w;
-		u32 src_h = pipe->src.h;
+		u32 src_w = DECIMATED_DIMENSION(pipe->src.w, pipe->horz_deci);
+		u32 src_h = DECIMATED_DIMENSION(pipe->src.h, pipe->vert_deci);
 
 		/*
 		 * plane 1 and 2 are for chroma and are same. While configuring
@@ -551,8 +545,9 @@ static int __mdss_mdp_validate_qseed3_cfg(struct mdss_mdp_pipe *pipe)
 		 */
 		if (plane == 1 && !pipe->horz_deci &&
 		    ((pipe->src_fmt->chroma_sample == MDSS_MDP_CHROMA_420) ||
-		     (pipe->src_fmt->chroma_sample == MDSS_MDP_CHROMA_H2V1)))
+		     (pipe->src_fmt->chroma_sample == MDSS_MDP_CHROMA_H2V1))) {
 			src_w >>= 1;
+		}
 
 		if (plane == 1 && !pipe->vert_deci &&
 		    ((pipe->src_fmt->chroma_sample == MDSS_MDP_CHROMA_420) ||
@@ -561,37 +556,39 @@ static int __mdss_mdp_validate_qseed3_cfg(struct mdss_mdp_pipe *pipe)
 
 		hor_req_pixels = pipe->scaler.num_ext_pxls_left[plane];
 
-		/**
-		 * libscaler provides the fetch values before decimation
-		 * and the rpt values are always 0, since qseed3 block
-		 * internally does the repeat.
-		 */
-		hor_fetch_pixels = DECIMATED_DIMENSION(src_w +
-				(int8_t)(pipe->scaler.left_ftch[plane]
-					& 0xFF) +
-				(int8_t)(pipe->scaler.right_ftch[plane]
-					& 0xFF),
-				pipe->horz_deci);
+		hor_fetch_pixels = src_w +
+			(pipe->scaler.left_ftch[plane] >> pipe->horz_deci) +
+			pipe->scaler.left_rpt[plane] +
+			(pipe->scaler.right_ftch[plane] >> pipe->horz_deci) +
+			pipe->scaler.right_rpt[plane];
+
+		hor_ov_fetch = src_w +
+			(pipe->scaler.left_ftch[plane] >> pipe->horz_deci) +
+			(pipe->scaler.right_ftch[plane] >> pipe->horz_deci);
 
 		vert_req_pixels = pipe->scaler.num_ext_pxls_top[plane];
 
-		vert_fetch_pixels = DECIMATED_DIMENSION(src_h +
-				(int8_t)(pipe->scaler.top_ftch[plane]
-					& 0xFF)+
-				(int8_t)(pipe->scaler.btm_ftch[plane]
-					& 0xFF),
-			pipe->vert_deci);
+		vert_fetch_pixels = src_h +
+			(pipe->scaler.top_ftch[plane] >> pipe->vert_deci) +
+			pipe->scaler.top_rpt[plane] +
+			(pipe->scaler.btm_ftch[plane] >> pipe->vert_deci) +
+			pipe->scaler.btm_rpt[plane];
+
+		vert_ov_fetch = src_h +
+			(pipe->scaler.top_ftch[plane] >> pipe->vert_deci) +
+			(pipe->scaler.btm_ftch[plane] >> pipe->vert_deci);
 
 		if ((hor_req_pixels != hor_fetch_pixels) ||
-			(hor_fetch_pixels > pipe->img_width) ||
+			(hor_ov_fetch > pipe->img_width) ||
 			(vert_req_pixels != vert_fetch_pixels) ||
-			(vert_fetch_pixels > pipe->img_height)) {
-			pr_err("err: plane=%d h_req:%d h_fetch:%d v_req:%d v_fetch:%d src_img[%d %d]\n",
+			(vert_ov_fetch > pipe->img_height)) {
+			pr_err("err: plane=%d h_req:%d h_fetch:%d v_req:%d v_fetch:%d src_img[%d %d] ov_fetch[%d %d]\n",
 
 					plane,
 					hor_req_pixels, hor_fetch_pixels,
 					vert_req_pixels, vert_fetch_pixels,
-					pipe->img_width, pipe->img_height);
+					pipe->img_width, pipe->img_height,
+					hor_ov_fetch, vert_ov_fetch);
 			pipe->scaler.enable = 0;
 			return -EINVAL;
 		}
@@ -952,6 +949,13 @@ int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 		pipe->dst.x += mixer->ctl->border_x_off;
 		pipe->dst.y += mixer->ctl->border_y_off;
 	}
+
+	if (mfd->panel_orientation & MDP_FLIP_LR)
+		pipe->dst.x = pipe->mixer_left->width
+			- pipe->dst.x - pipe->dst.w;
+	if (mfd->panel_orientation & MDP_FLIP_UD)
+		pipe->dst.y = pipe->mixer_left->height
+			- pipe->dst.y - pipe->dst.h;
 
 	pipe->horz_deci = req->horz_deci;
 	pipe->vert_deci = req->vert_deci;
@@ -1954,6 +1958,8 @@ int mdss_mode_switch(struct msm_fb_data_type *mfd, u32 mode)
 		mdss_mdp_update_panel_info(mfd, 1, 0);
 		mdss_mdp_switch_to_cmd_mode(ctl, 0);
 		mdss_mdp_ctl_stop(ctl, MDSS_PANEL_POWER_OFF);
+		writel_relaxed(0xffffffff, ctl->mdata->mdp_base + MDSS_REG_HW_INTR2_CLEAR);
+		wmb();
 	} else if (mode == MIPI_VIDEO_PANEL) {
 		if (ctl->ops.wait_pingpong)
 			rc = ctl->ops.wait_pingpong(ctl, NULL);
@@ -1998,6 +2004,8 @@ int mdss_mode_switch_post(struct msm_fb_data_type *mfd, u32 mode)
 			MDSS_EVENT_DSI_DYNAMIC_SWITCH,
 			(void *) MIPI_VIDEO_PANEL, CTL_INTF_EVENT_FLAG_DEFAULT);
 		pr_debug("%s, end\n", __func__);
+		writel_relaxed(0xffffffff, ctl->mdata->mdp_base + MDSS_REG_HW_INTR2_CLEAR);
+		wmb();
 	} else if (mode == MIPI_CMD_PANEL) {
 		/*
 		 * Needed to balance out clk refcount when going
@@ -2318,12 +2326,14 @@ set_roi:
 }
 
 /*
- * Check if there is any change in secure state and store it.
+ * Enables/disable secure (display or camera) sessions
  */
-static void __overlay_set_secure_transition_state(struct msm_fb_data_type *mfd)
+static int __overlay_secure_ctrl(struct msm_fb_data_type *mfd)
 {
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
+	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
 	struct mdss_mdp_pipe *pipe;
+	int ret = 0;
 	int sd_in_pipe = 0;
 	int sc_in_pipe = 0;
 	u64 pipes_flags = 0;
@@ -2344,53 +2354,25 @@ static void __overlay_set_secure_transition_state(struct msm_fb_data_type *mfd)
 	MDSS_XLOG(sd_in_pipe, sc_in_pipe, pipes_flags,
 			mdp5_data->sc_enabled, mdp5_data->sd_enabled);
 	pr_debug("sd:%d sd_in_pipe:%d sc:%d sc_in_pipe:%d flags:0x%llx\n",
-			mdp5_data->sd_enabled, sd_in_pipe,
-			mdp5_data->sc_enabled, sc_in_pipe, pipes_flags);
-
-	/* Reset the secure transition state */
-	mdp5_data->secure_transition_state = SECURE_TRANSITION_NONE;
+		mdp5_data->sd_enabled, sd_in_pipe,
+		mdp5_data->sc_enabled, sc_in_pipe, pipes_flags);
 
 	/*
-	 * Secure transition would be NONE in two conditions:
-	 * 1. All the features are already disabled and state remains
-	 *    disabled for the pipes.
-	 * 2. One of the features is already enabled and state remains
-	 *    enabled for the pipes.
-	 */
+	* Return early in only two conditions:
+	* 1. All the features are already disabled and state remains
+	*    disabled for the pipes.
+	* 2. One of the features is already enabled and state remains
+	*    enabled for the pipes.
+	*/
 	if (!sd_in_pipe && !mdp5_data->sd_enabled &&
 			!sc_in_pipe && !mdp5_data->sc_enabled)
-		return;
+		return ret;
 	else if ((sd_in_pipe && mdp5_data->sd_enabled) ||
 			(sc_in_pipe && mdp5_data->sc_enabled))
-		return;
-
-	/* Secure Display */
-	if (!mdp5_data->sd_enabled && sd_in_pipe)
-		mdp5_data->secure_transition_state |= SD_NON_SECURE_TO_SECURE;
-	else if (mdp5_data->sd_enabled && !sd_in_pipe)
-		mdp5_data->secure_transition_state |= SD_SECURE_TO_NON_SECURE;
-
-	/* Secure Camera */
-	if (!mdp5_data->sc_enabled && sc_in_pipe)
-		mdp5_data->secure_transition_state |= SC_NON_SECURE_TO_SECURE;
-	else if (mdp5_data->sc_enabled && !sc_in_pipe)
-		mdp5_data->secure_transition_state |= SC_SECURE_TO_NON_SECURE;
-}
-
-/*
- * Enable/disable secure (display or camera) sessions
- */
-static int __overlay_secure_ctrl(struct msm_fb_data_type *mfd)
-{
-	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
-	struct mdss_mdp_ctl *ctl = mfd_to_ctl(mfd);
-	int ret = 0;
-
-	if (mdp5_data->secure_transition_state == SECURE_TRANSITION_NONE)
 		return ret;
 
 	/* Secure Display */
-	if (mdp5_data->secure_transition_state == SD_NON_SECURE_TO_SECURE) {
+	if (!mdp5_data->sd_enabled && sd_in_pipe) {
 		if (!mdss_get_sd_client_cnt()) {
 			MDSS_XLOG(0x11);
 			/*wait for ping pong done */
@@ -2412,8 +2394,7 @@ static int __overlay_secure_ctrl(struct msm_fb_data_type *mfd)
 		}
 		mdp5_data->sd_enabled = 1;
 		mdss_update_sd_client(mdp5_data->mdata, true);
-	} else if (mdp5_data->secure_transition_state ==
-			SD_SECURE_TO_NON_SECURE) {
+	} else if (mdp5_data->sd_enabled && !sd_in_pipe) {
 		/* disable the secure display on last client */
 		if (mdss_get_sd_client_cnt() == 1) {
 			MDSS_XLOG(0x22);
@@ -2431,9 +2412,11 @@ static int __overlay_secure_ctrl(struct msm_fb_data_type *mfd)
 	}
 
 	/* Secure Camera */
-	if (mdp5_data->secure_transition_state == SC_NON_SECURE_TO_SECURE) {
+	if (!mdp5_data->sc_enabled && sc_in_pipe) {
 		if (!mdss_get_sc_client_cnt()) {
 			MDSS_XLOG(0x33);
+			if (ctl->ops.wait_pingpong)
+				mdss_mdp_display_wait4pingpong(ctl, true);
 			ret = mdss_mdp_secure_session_ctrl(1,
 					MDP_SECURE_CAMERA_OVERLAY_SESSION);
 			if (ret) {
@@ -2443,8 +2426,7 @@ static int __overlay_secure_ctrl(struct msm_fb_data_type *mfd)
 		}
 		mdp5_data->sc_enabled = 1;
 		mdss_update_sc_client(mdp5_data->mdata, true);
-	} else if (mdp5_data->secure_transition_state ==
-			SC_SECURE_TO_NON_SECURE) {
+	} else if (mdp5_data->sc_enabled && !sc_in_pipe) {
 		/* disable the secure camera on last client */
 		if (mdss_get_sc_client_cnt() == 1) {
 			MDSS_XLOG(0x44);
@@ -2523,23 +2505,15 @@ int mdss_mdp_overlay_kickoff(struct msm_fb_data_type *mfd,
 		list_move(&pipe->list, &mdp5_data->pipes_destroy);
 	}
 
-	__overlay_set_secure_transition_state(mfd);
 	/*
 	 * go to secure state if required, this should be done
 	 * after moving the buffers from the previous commit to
-	 * destroy list.
-	 * For video mode panels, secure display/camera should be disabled
-	 * after flushing the new buffer. Skip secure disable here for those
-	 * cases.
+	 * destroy list
 	 */
-	if (!((mfd->panel_info->type == MIPI_VIDEO_PANEL) &&
-	    ((mdp5_data->secure_transition_state == SD_SECURE_TO_NON_SECURE) ||
-	    (mdp5_data->secure_transition_state == SC_SECURE_TO_NON_SECURE)))) {
-		ret = __overlay_secure_ctrl(mfd);
-		if (IS_ERR_VALUE(ret)) {
-			pr_err("secure operation failed %d\n", ret);
-			goto commit_fail;
-		}
+	ret = __overlay_secure_ctrl(mfd);
+	if (IS_ERR_VALUE(ret)) {
+		pr_err("secure operation failed %d\n", ret);
+		goto commit_fail;
 	}
 
 	/* call this function before any registers programming */
@@ -2594,18 +2568,6 @@ int mdss_mdp_overlay_kickoff(struct msm_fb_data_type *mfd,
 	mdss_mdp_splash_cleanup(mfd, true);
 
 	/*
-	 * Wait for pingpong done only during resume for
-	 * command mode panels. Ensure that one commit is
-	 * sent before kickoff completes so that backlight
-	 * update happens after it.
-	 */
-	if (mdss_fb_is_power_off(mfd) &&
-		mfd->panel_info->type == MIPI_CMD_PANEL) {
-		pr_debug("wait for pp done after resume for cmd mode\n");
-		mdss_mdp_display_wait4pingpong(ctl, true);
-	}
-
-	/*
 	 * Configure Timing Engine, if new fps was set.
 	 * We need to do this after the wait for vsync
 	 * to guarantee that mdp flush bit and dsi flush
@@ -2622,17 +2584,6 @@ int mdss_mdp_overlay_kickoff(struct msm_fb_data_type *mfd,
 	}
 
 	mutex_lock(&mdp5_data->ov_lock);
-
-	/* Disable secure display/camera for video mode panels */
-	if ((mfd->panel_info->type == MIPI_VIDEO_PANEL) &&
-	    ((mdp5_data->secure_transition_state == SD_SECURE_TO_NON_SECURE) ||
-	    (mdp5_data->secure_transition_state == SC_SECURE_TO_NON_SECURE))) {
-		ret = __overlay_secure_ctrl(mfd);
-		if (IS_ERR_VALUE(ret)) {
-			pr_err("secure operation failed %d\n", ret);
-			goto commit_fail;
-		}
-	}
 
 	mdss_fb_update_notify_update(mfd);
 commit_fail:
@@ -2959,16 +2910,6 @@ static int mdss_mdp_overlay_get_fb_pipe(struct msm_fb_data_type *mfd,
 				req->src_rect = right_rect;
 		}
 
-		if (mfd->panel_orientation == MDP_ROT_180) {
-			if (mixer_mux == MDSS_MDP_MIXER_MUX_RIGHT) {
-				req->src_rect.x = 0;
-				req->dst_rect.x = mixer->width;
-			} else {
-				req->src_rect.x = (split_lm) ? mixer->width : 0;
-				req->dst_rect.x = 0;
-			}
-		}
-
 		req->z_order = MDSS_MDP_STAGE_BASE;
 		if (rotate_180)
 			req->flags |= (MDP_FLIP_LR | MDP_FLIP_UD);
@@ -3056,13 +2997,6 @@ static void mdss_mdp_overlay_pan_display(struct msm_fb_data_type *mfd)
 		goto pipe_release;
 	}
 
-	if (l_pipe_allocated &&
-			(l_pipe->multirect.num == MDSS_MDP_PIPE_RECT1)) {
-		pr_err("Invalid: L_Pipe-%d is assigned for RECT-%d\n",
-				l_pipe->num, l_pipe->multirect.num);
-		goto pipe_release;
-	}
-
 	if (mdss_mdp_pipe_map(l_pipe)) {
 		pr_err("unable to map base pipe\n");
 		goto pipe_release;
@@ -3107,16 +3041,6 @@ static void mdss_mdp_overlay_pan_display(struct msm_fb_data_type *mfd)
 			MDSS_MDP_MIXER_MUX_RIGHT, &r_pipe_allocated);
 		if (ret) {
 			pr_err("unable to allocate right base pipe\n");
-			goto iommu_disable;
-		}
-
-		if (l_pipe_allocated && r_pipe_allocated &&
-				(l_pipe->num != r_pipe->num) &&
-				(r_pipe->multirect.num ==
-				 MDSS_MDP_PIPE_RECT1)) {
-			pr_err("Invalid: L_Pipe-%d,RECT-%d R_Pipe-%d,RECT-%d\n",
-					l_pipe->num, l_pipe->multirect.num,
-					r_pipe->num, l_pipe->multirect.num);
 			goto iommu_disable;
 		}
 
@@ -3508,8 +3432,7 @@ static ssize_t dynamic_fps_sysfs_wta_dfps(struct device *dev,
 	struct mdss_overlay_private *mdp5_data = mfd_to_mdp5_data(mfd);
 	struct dynamic_fps_data data = {0};
 
-	if (!mdp5_data->ctl || !mdss_mdp_ctl_is_power_on(mdp5_data->ctl) ||
-			mdss_panel_is_power_off(mfd->panel_power_state)) {
+	if (!mdp5_data->ctl || !mdss_mdp_ctl_is_power_on(mdp5_data->ctl)) {
 		pr_debug("panel is off\n");
 		return count;
 	}
@@ -3553,13 +3476,6 @@ static ssize_t dynamic_fps_sysfs_wta_dfps(struct device *dev,
 		pr_debug("%s: FPS is already %d\n",
 			__func__, data.fps);
 		return count;
-	}
-
-	if (data.hfp > DFPS_DATA_MAX_HFP || data.hbp > DFPS_DATA_MAX_HBP ||
-		data.hpw > DFPS_DATA_MAX_HPW || data.fps > DFPS_DATA_MAX_FPS ||
-		data.clk_rate > DFPS_DATA_MAX_CLK_RATE){
-		pr_err("Data values out of bound.\n");
-		return -EINVAL;
 	}
 
 	rc = mdss_mdp_dfps_update_params(mfd, pdata, &data);
@@ -4455,21 +4371,12 @@ static int mdss_mdp_hw_cursor_pipe_update(struct msm_fb_data_type *mfd,
 		start_y = 0;
 	}
 
-	if ((img->width > mdata->max_cursor_size) ||
-		(img->height > mdata->max_cursor_size) ||
-		(img->depth != 32) || (start_x >= xres) ||
-		(start_y >= yres)) {
-		pr_err("Invalid cursor image coordinates\n");
-		ret = -EINVAL;
-		goto done;
-	}
-
 	roi.w = min(xres - start_x, img->width - roi.x);
 	roi.h = min(yres - start_y, img->height - roi.y);
 
 	if ((roi.w > mdata->max_cursor_size) ||
-		(roi.h > mdata->max_cursor_size)) {
-		pr_err("Invalid cursor ROI size\n");
+		(roi.h > mdata->max_cursor_size) ||
+		(img->depth != 32) || (start_x >= xres) || (start_y >= yres)) {
 		ret = -EINVAL;
 		goto done;
 	}
@@ -6312,13 +6219,6 @@ int mdss_mdp_input_event_handler(struct msm_fb_data_type *mfd)
 	return rc;
 }
 
-void mdss_mdp_footswitch_ctrl_handler(bool on)
-{
-	struct mdss_data_type *mdata = mdss_mdp_get_mdata();
-
-	mdss_mdp_footswitch_ctrl(mdata, on);
-}
-
 int mdss_mdp_overlay_init(struct msm_fb_data_type *mfd)
 {
 	struct device *dev = mfd->fbi->dev;
@@ -6360,14 +6260,6 @@ int mdss_mdp_overlay_init(struct msm_fb_data_type *mfd)
 	mdp5_interface->splash_init_fnc = mdss_mdp_splash_init;
 	mdp5_interface->configure_panel = mdss_mdp_update_panel_info;
 	mdp5_interface->input_event_handler = mdss_mdp_input_event_handler;
-
-	/*
-	 * Register footswitch control only for primary fb pm
-	 * suspend/resume calls.
-	 */
-	if (mfd->panel_info->is_prim_panel)
-		mdp5_interface->footswitch_ctrl =
-			mdss_mdp_footswitch_ctrl_handler;
 
 	if (mfd->panel_info->type == WRITEBACK_PANEL) {
 		mdp5_interface->atomic_validate =

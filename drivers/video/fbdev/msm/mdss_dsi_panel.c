@@ -10,6 +10,7 @@
  * GNU General Public License for more details.
  */
 
+#include <linux/backlight.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/of.h>
@@ -27,8 +28,11 @@
 #include "mdss_dba_utils.h"
 #include "mdss_debug.h"
 
+#include "mdss_htc_util.h"
+
 #define DT_CMD_HDR 6
 #define DEFAULT_MDP_TRANSFER_TIME 14000
+#define MDSS_BL_SETTING_DEF 142
 
 #define VSYNC_DELAY msecs_to_jiffies(17)
 
@@ -260,6 +264,16 @@ static int mdss_dsi_request_gpios(struct mdss_dsi_ctrl_pdata *ctrl_pdata)
 			rc);
 		goto rst_gpio_err;
 	}
+	if (gpio_is_valid(ctrl_pdata->bklt_en_gpio)) {
+		rc = gpio_request(ctrl_pdata->bklt_en_gpio,
+						"bklt_enable");
+		if (rc) {
+			pr_err("request bklt gpio failed, rc=%d\n",
+				       rc);
+			goto bklt_en_gpio_err;
+		}
+	}
+
 	if (gpio_is_valid(ctrl_pdata->lcd_mode_sel_gpio)) {
 		rc = gpio_request(ctrl_pdata->lcd_mode_sel_gpio, "mode_sel");
 		if (rc) {
@@ -272,86 +286,14 @@ static int mdss_dsi_request_gpios(struct mdss_dsi_ctrl_pdata *ctrl_pdata)
 	return rc;
 
 lcd_mode_sel_gpio_err:
+	if (gpio_is_valid(ctrl_pdata->bklt_en_gpio))
+		gpio_free(ctrl_pdata->bklt_en_gpio);
+bklt_en_gpio_err:
 	gpio_free(ctrl_pdata->rst_gpio);
 rst_gpio_err:
 	if (gpio_is_valid(ctrl_pdata->disp_en_gpio))
 		gpio_free(ctrl_pdata->disp_en_gpio);
 disp_en_gpio_err:
-	return rc;
-}
-
-int mdss_dsi_bl_gpio_ctrl(struct mdss_panel_data *pdata, int enable)
-{
-	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
-	int rc = 0, val = 0;
-
-	if (pdata == NULL) {
-		pr_err("%s: Invalid input data\n", __func__);
-		return -EINVAL;
-	}
-
-	ctrl_pdata = container_of(pdata, struct mdss_dsi_ctrl_pdata,
-				panel_data);
-	if (ctrl_pdata == NULL) {
-		pr_err("%s: Invalid ctrl data\n", __func__);
-		return -EINVAL;
-	}
-
-	/* if gpio is not valid */
-	if (!gpio_is_valid(ctrl_pdata->bklt_en_gpio))
-		return rc;
-
-	pr_debug("%s: enable = %d\n", __func__, enable);
-
-	/*
-	 * if gpio state is false and enable (bl level) is
-	 * non zero then toggle the gpio
-	 */
-	if (!ctrl_pdata->bklt_en_gpio_state && enable) {
-		rc = gpio_request(ctrl_pdata->bklt_en_gpio, "bklt_enable");
-		if (rc) {
-			pr_err("request bklt gpio failed, rc=%d\n", rc);
-			goto free;
-		}
-
-		if (ctrl_pdata->bklt_en_gpio_invert)
-			val = 0;
-		 else
-			val = 1;
-
-		rc = gpio_direction_output(ctrl_pdata->bklt_en_gpio, val);
-		if (rc) {
-			pr_err("%s: unable to set dir for bklt gpio val %d\n",
-						__func__, val);
-			goto free;
-		}
-		ctrl_pdata->bklt_en_gpio_state = true;
-		goto ret;
-	} else if (ctrl_pdata->bklt_en_gpio_state && !enable) {
-		/*
-		 * if gpio state is true and enable (bl level) is
-		 * zero then toggle the gpio
-		 */
-		if (ctrl_pdata->bklt_en_gpio_invert)
-			val = 1;
-		 else
-			val = 0;
-
-		rc = gpio_direction_output(ctrl_pdata->bklt_en_gpio, val);
-		if (rc)
-			pr_err("%s: unable to set dir for bklt gpio val %d\n",
-						__func__, val);
-		goto free;
-	}
-
-	/* gpio state is true and bl level is non zero */
-	goto ret;
-
-free:
-	pr_debug("%s: free bklt gpio\n", __func__);
-	ctrl_pdata->bklt_en_gpio_state = false;
-	gpio_free(ctrl_pdata->bklt_en_gpio);
-ret:
 	return rc;
 }
 
@@ -424,6 +366,22 @@ int mdss_dsi_panel_reset(struct mdss_panel_data *pdata, int enable)
 				if (pdata->panel_info.rst_seq[++i])
 					usleep_range(pinfo->rst_seq[i] * 1000, pinfo->rst_seq[i] * 1000);
 			}
+
+			if (gpio_is_valid(ctrl_pdata->bklt_en_gpio)) {
+
+				if (ctrl_pdata->bklt_en_gpio_invert)
+					rc = gpio_direction_output(
+						ctrl_pdata->bklt_en_gpio, 0);
+				else
+					rc = gpio_direction_output(
+						ctrl_pdata->bklt_en_gpio, 1);
+
+				if (rc) {
+					pr_err("%s: unable to set dir for bklt gpio\n",
+						__func__);
+					goto exit;
+				}
+			}
 		}
 
 		if (gpio_is_valid(ctrl_pdata->lcd_mode_sel_gpio)) {
@@ -452,6 +410,15 @@ int mdss_dsi_panel_reset(struct mdss_panel_data *pdata, int enable)
 			pr_debug("%s: Reset panel done\n", __func__);
 		}
 	} else {
+		if (gpio_is_valid(ctrl_pdata->bklt_en_gpio)) {
+
+			if (ctrl_pdata->bklt_en_gpio_invert)
+				gpio_set_value((ctrl_pdata->bklt_en_gpio), 1);
+			else
+				gpio_set_value((ctrl_pdata->bklt_en_gpio), 0);
+
+			gpio_free(ctrl_pdata->bklt_en_gpio);
+		}
 		if (gpio_is_valid(ctrl_pdata->disp_en_gpio)) {
 			gpio_set_value((ctrl_pdata->disp_en_gpio), 0);
 			gpio_free(ctrl_pdata->disp_en_gpio);
@@ -834,9 +801,6 @@ static void mdss_dsi_panel_bl_ctrl(struct mdss_panel_data *pdata,
 	if ((bl_level < pdata->panel_info.bl_min) && (bl_level != 0))
 		bl_level = pdata->panel_info.bl_min;
 
-	/* enable the backlight gpio if present */
-	mdss_dsi_bl_gpio_ctrl(pdata, bl_level);
-
 	switch (ctrl_pdata->bklt_ctrl) {
 	case BL_WLED:
 		led_trigger_event(bl_led_trigger, bl_level);
@@ -868,6 +832,13 @@ static void mdss_dsi_panel_bl_ctrl(struct mdss_panel_data *pdata,
 				mdss_dsi_panel_bklt_dcs(sctrl, bl_level);
 		}
 		break;
+	case BL_BACKLIGHT:
+		if (ctrl_pdata->bklt_dev) {
+			ctrl_pdata->bklt_dev->props.brightness = bl_level;
+			backlight_update_status(ctrl_pdata->bklt_dev);
+		}
+		break;
+
 	default:
 		pr_err("%s: Unknown bl_ctrl configuration\n",
 			__func__);
@@ -1383,44 +1354,6 @@ static int mdss_dsi_parse_hdr_settings(struct device_node *np,
 			hdr_prop->hdr_enabled = false;
 		}
 	}
-	return 0;
-}
-
-static int mdss_dsi_parse_split_link_settings(struct device_node *np,
-		struct mdss_panel_info *pinfo)
-{
-	u32 tmp;
-	int rc = 0;
-
-	if (!np) {
-		pr_err("%s: device node pointer is NULL\n", __func__);
-		return -EINVAL;
-	}
-
-	if (!pinfo) {
-		pr_err("%s: panel info is NULL\n", __func__);
-		return -EINVAL;
-	}
-
-	pinfo->split_link_enabled = of_property_read_bool(np,
-		"qcom,split-link-enabled");
-
-	if (pinfo->split_link_enabled) {
-		rc = of_property_read_u32(np,
-			"qcom,sublinks-count", &tmp);
-		/* default num of sublink is 1*/
-		pinfo->mipi.num_of_sublinks = (!rc ? tmp : 1);
-
-		rc = of_property_read_u32(np,
-			"qcom,lanes-per-sublink", &tmp);
-		/* default num of lanes per sublink is 1 */
-		pinfo->mipi.lanes_per_sublink = (!rc ? tmp : 1);
-	}
-
-	pr_info("%s: enable %d sublinks-count %d lanes per sublink %d\n",
-		__func__, pinfo->split_link_enabled,
-		pinfo->mipi.num_of_sublinks,
-		pinfo->mipi.lanes_per_sublink);
 	return 0;
 }
 
@@ -2018,6 +1951,13 @@ static void mdss_dsi_parse_esd_params(struct device_node *np,
 				pr_err("TE-ESD not valid for video mode\n");
 				goto error;
 			}
+		} else if (!strcmp(string, "te_signal_check_v2")) {
+			if (pinfo->mipi.mode == DSI_CMD_MODE) {
+				ctrl->status_mode = ESD_TE_V2;
+			} else {
+				pr_err("TE-ESD not valid for video mode\n");
+				goto error;
+			}
 		} else {
 			pr_err("No valid panel-status-check-mode string\n");
 			goto error;
@@ -2330,6 +2270,7 @@ int mdss_panel_parse_bl_settings(struct device_node *np,
 	const char *data;
 	int rc = 0;
 	u32 tmp;
+	struct device_node *backlight = NULL;
 
 	ctrl_pdata->bklt_ctrl = UNKNOWN_CTRL;
 	data = of_get_property(np, "qcom,mdss-dsi-bl-pmic-control-type", NULL);
@@ -2380,6 +2321,20 @@ int mdss_panel_parse_bl_settings(struct device_node *np,
 			ctrl_pdata->bklt_ctrl = BL_DCS_CMD;
 			pr_debug("%s: Configured DCS_CMD bklt ctrl\n",
 								__func__);
+		} else if (!strcmp(data, "bl_ctrl_backlight")) {
+			backlight = of_parse_phandle(np, "htc,mdss-dsi-bl-backlight", 0);
+			if (!backlight)
+				return -EINVAL;
+
+			ctrl_pdata->bklt_ctrl = BL_BACKLIGHT;
+			ctrl_pdata->bklt_dev = of_find_backlight_by_node(backlight);
+			of_node_put(backlight);
+			if (!ctrl_pdata->bklt_dev) {
+				pr_err("backlight device not found\n");
+				return -EPROBE_DEFER;
+			}
+                        else
+			        pr_info("register backlight device successfully\n");
 		}
 	}
 	return 0;
@@ -2657,6 +2612,84 @@ exit:
 	return rc;
 }
 
+static int htc_mdss_dsi_parse_brt_bl_table(struct device_node *np,
+		struct mdss_panel_info *panel_info,
+		const char *name)
+{
+	u32 *data;
+	int i, len = 0;
+	struct htc_backlight1_table *brt_bl_table = &panel_info->brt_bl_table;
+
+	data = (u32 *)of_get_property(np, name, &len);
+	len /= sizeof(u32);
+
+	if (!data || len % 2) {
+		pr_debug("%s: read %s failed\n", __func__, name);
+	} else {
+		/* Separate the bl and brt table */
+		len /= 2;
+
+		if (brt_bl_table->size || brt_bl_table->brt_data || brt_bl_table->bl_data || brt_bl_table->bl_data_raw) {
+			brt_bl_table->size = 0;
+			kfree(brt_bl_table->brt_data);
+			kfree(brt_bl_table->bl_data);
+			kfree(brt_bl_table->bl_data_raw);
+		}
+
+		brt_bl_table->brt_data = kzalloc(len * sizeof(u16), GFP_KERNEL);
+		brt_bl_table->bl_data = kzalloc(len * sizeof(u16), GFP_KERNEL);
+		brt_bl_table->bl_data_raw = kzalloc(len * sizeof(u16), GFP_KERNEL);
+		if (!brt_bl_table->brt_data || !brt_bl_table->bl_data || !brt_bl_table->bl_data_raw) {
+			pr_err("%s:%d, allocate memory failed for %s\n", __func__, __LINE__, name);
+			return 0;
+		}
+
+		for (i = 0; i < len; i++) {
+			brt_bl_table->brt_data[i] = (u16) be32_to_cpup( data + (i * 2));
+			brt_bl_table->bl_data[i] = (u16) be32_to_cpup( data + (i * 2) +1);
+			brt_bl_table->bl_data_raw[i] = (u16) be32_to_cpup( data + (i * 2) +1);
+			pr_debug("%s: bl=%d brt=%d i=%d\n", __func__, brt_bl_table->bl_data[i], brt_bl_table->brt_data[i], i);
+		}
+		brt_bl_table->size = len;
+		brt_bl_table->apply_cali = false;
+		pr_info("%s: read %s success, brt_bl_table_size=%d\n", __func__, name, brt_bl_table->size);
+	}
+	return 0;
+}
+
+static void mdss_dsi_parse_calibration_gain(struct calibration_gain *gain)
+{
+	struct device_node *disp_cali_offset;
+	char *disp_cali_data = NULL;
+	int disp_cali_size = 0;
+
+	disp_cali_offset = of_find_node_by_path(CALIBRATION_DATA_PATH);
+	if (disp_cali_offset) {
+		disp_cali_data = (char *) of_get_property(disp_cali_offset,
+				DISP_FLASH_DATA, &disp_cali_size);
+		pr_info("%s: disp_cali_size = %d\n", __func__, disp_cali_size);
+
+		if (disp_cali_data && (disp_cali_size >= DISP_FLASH_DATA_SIZE)) {
+			/* RGB brightness calibration data */
+			int i;
+			u16 tmp[LIGHT_CALI_SIZE/2];
+			for (i = 0; i < LIGHT_CALI_SIZE/2; i++) {
+				tmp[i] = disp_cali_data[LIGHT_CALI_OFFSET+(i*2)] +
+					(disp_cali_data[LIGHT_CALI_OFFSET+(i*2)+1] << 8);
+				pr_info("%s: PA[%d] = 0x%x\n", __func__, i, tmp[i]);
+			}
+			gain->BKL = tmp[LIGHT_RATIO_INDEX];	/* 0x3B24-0x3B25 */
+			gain->R = tmp[LIGHT_R_INDEX];		/* 0x3B26-0x3B27 */
+			gain->G = tmp[LIGHT_G_INDEX];		/* 0x3B28-0x3B29 */
+			gain->B = tmp[LIGHT_B_INDEX];		/* 0x3B3A-0x3B3B */
+			pr_info("%s: R = 0x%x, G = 0x%x B = 0x%x BL=%d \n", __func__,
+				gain->R, gain->G, gain->B, gain->BKL);
+		} else
+			pr_info("%s: disp_cali data less\n", __func__);
+	} else
+			pr_info("%s: No disp_cali data\n", __func__);
+}
+
 static int mdss_panel_parse_dt(struct device_node *np,
 			struct mdss_dsi_ctrl_pdata *ctrl_pdata)
 {
@@ -2666,6 +2699,9 @@ static int mdss_panel_parse_dt(struct device_node *np,
 	static const char *pdest;
 	const char *bridge_chip_name;
 	struct mdss_panel_info *pinfo = &(ctrl_pdata->panel_data.panel_info);
+	int i = 0;
+	char cmd[128];
+	struct device_node *color_temp_np = NULL;
 
 	if (mdss_dsi_is_hw_config_split(ctrl_pdata->shared_data))
 		pinfo->is_split_display = true;
@@ -2808,15 +2844,9 @@ static int mdss_panel_parse_dt(struct device_node *np,
 	pinfo->mipi.data_lane3 = of_property_read_bool(np,
 		"qcom,mdss-dsi-lane-3-state");
 
-	/* parse split link properties */
-	rc = mdss_dsi_parse_split_link_settings(np, pinfo);
-	if (rc)
-		return rc;
-
 	rc = mdss_panel_parse_display_timings(np, &ctrl_pdata->panel_data);
 	if (rc)
 		return rc;
-
 	rc = mdss_dsi_parse_hdr_settings(np, pinfo);
 	if (rc)
 		return rc;
@@ -2903,12 +2933,62 @@ static int mdss_panel_parse_dt(struct device_node *np,
 			MSM_DBA_CHIP_NAME_MAX_LEN);
 	}
 
-	rc = of_property_read_u32(np,
-		"qcom,mdss-dsi-host-esc-clk-freq-hz",
-		&pinfo->esc_clk_rate_hz);
-	if (rc)
-		pinfo->esc_clk_rate_hz = MDSS_DSI_MAX_ESC_CLK_RATE_HZ;
-	pr_debug("%s: esc clk %d\n", __func__, pinfo->esc_clk_rate_hz);
+	/*HTC:ADD*/
+	/* Suported brightness transfer for Backlight 1.0*/
+	pinfo->brt_bl_table.size = 0;
+	htc_mdss_dsi_parse_brt_bl_table(np, pinfo, "htc,brt-bl-table");
+
+	/* Suported camera on BL control */
+	rc = of_property_read_u32(np, "htc,mdss-camera-blk", &tmp);
+	pinfo->camera_blk = (!rc ? tmp : MDSS_BL_SETTING_DEF);
+
+	/* Suported CABC mode switch control */
+	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->cabc_off_cmds,
+		"htc,cabc-off-cmds", "qcom,mdss-dsi-default-command-state");
+
+	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->cabc_ui_cmds,
+		"htc,cabc-ui-cmds", "qcom,mdss-dsi-default-command-state");
+
+	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->cabc_video_cmds,
+		"htc,cabc-video-cmds", "qcom,mdss-dsi-default-command-state");
+
+	/* Suported brust mode switch control */
+	rc = of_property_read_u32(np, "htc,burst-on-level", &tmp);
+	ctrl_pdata->burst_on_level = (!rc ? tmp : 0);
+
+	rc = of_property_read_u32(np, "htc,burst-off-level", &tmp);
+	ctrl_pdata->burst_off_level = (!rc ? tmp : 0);
+
+	rc = of_property_read_u32(np, "htc,burst-bl-value", &tmp);
+	pinfo->burst_bl_value = (!rc ? tmp : 0);
+
+	if (of_find_property(np, "htc,color-temp-cmds", NULL)) {
+		color_temp_np = of_parse_phandle(np, "htc,color-temp-cmds", 0);
+		if (!color_temp_np) {
+			pr_err("%s:err parsing htc,color-temp-cmds\n", __func__);
+		} else {
+			ctrl_pdata->color_temp_cnt = 0;
+			for (i = 0; i < COLOR_TEMP_MODE; i++) {
+				snprintf(cmd, sizeof(cmd),"htc,color-temp%d-cmds", i);
+				mdss_dsi_parse_dcs_cmds(color_temp_np, &ctrl_pdata->color_temp_cmds[i],
+						cmd, "qcom,mdss-dsi-default-command-state");
+				if (!ctrl_pdata->color_temp_cmds[i].cmds)
+					break;
+				else
+					ctrl_pdata->color_temp_cnt++;
+			}
+			rc = of_property_read_u32(np, "htc,color-rgb-loca", &tmp);
+			ctrl_pdata->color_rgb_loca = (!rc ? tmp : 0);
+			rc = of_property_read_u32(np, "htc,color-rgbcmy-loca", &tmp);
+			ctrl_pdata->color_rgbcmy_loca = (!rc ? tmp : 0);
+		}
+	}
+
+	/* Supported display calibration control*/
+	mdss_dsi_parse_dcs_cmds(np, &ctrl_pdata->disp_cali_cmds,
+		"htc,disp-cali-cmds", "qcom,mdss-dsi-default-command-state");
+
+	mdss_dsi_parse_calibration_gain(&pinfo->cali_gain);
 
 	return 0;
 

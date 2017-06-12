@@ -15,7 +15,6 @@
 #define _APR_AUDIO_V2_H_
 
 #include <linux/qdsp6v2/apr.h>
-#include <linux/msm_audio.h>
 
 /* size of header needed for passing data out of band */
 #define APR_CMD_OB_HDR_SZ  12
@@ -443,23 +442,6 @@ struct adm_param_data_v5 {
 	 * This field must be set to zero.
 	 */
 } __packed;
-
-#define ASM_STREAM_CMD_REGISTER_PP_EVENTS 0x00013213
-#define ASM_STREAM_PP_EVENT 0x00013214
-#define DSP_STREAM_CMD "ADSP Stream Cmd"
-#define DSP_STREAM_CALLBACK "ADSP Stream Callback Event"
-#define DSP_STREAM_CALLBACK_QUEUE_SIZE 1024
-
-struct dsp_stream_callback_list {
-	struct list_head list;
-	struct msm_adsp_event_data event;
-};
-
-struct dsp_stream_callback_prtd {
-	uint16_t event_count;
-	struct list_head event_queue;
-	spinlock_t prtd_spin_lock;
-};
 
 /* set customized mixing on matrix mixer */
 #define ADM_CMD_SET_PSPD_MTMX_STRTR_PARAMS_V5                        0x00010344
@@ -5070,7 +5052,6 @@ struct asm_amrwbplus_fmt_blk_v2 {
 #define ASM_MEDIA_FMT_VORBIS                 0x00010C15
 #define ASM_MEDIA_FMT_APE                    0x00012F32
 #define ASM_MEDIA_FMT_DSD                    0x00012F3E
-#define ASM_MEDIA_FMT_TRUEHD                 0x00013215
 
 /* Media format ID for adaptive transform acoustic coding. This
  * ID is used by the #ASM_STREAM_CMD_OPEN_WRITE_COMPRESSED command
@@ -6333,62 +6314,6 @@ struct asm_stream_cmd_get_pp_params_v2 {
 } __packed;
 
 #define ASM_STREAM_CMD_SET_ENCDEC_PARAM 0x00010C10
-
-#define ASM_STREAM_CMD_SET_ENCDEC_PARAM_V2     0x00013218
-
-struct asm_stream_cmd_set_encdec_param_v2 {
-	u16                  service_id;
-	/* 0 - ASM_ENCODER_SVC; 1 - ASM_DECODER_SVC */
-
-	u16                  reserved;
-
-	u32                  param_id;
-	/* ID of the parameter. */
-
-	u32                  param_size;
-	/*
-	 * Data size of this parameter, in bytes. The size is a multiple
-	 * of 4 bytes.
-	 */
-} __packed;
-
-#define ASM_STREAM_CMD_REGISTER_ENCDEC_EVENTS  0x00013219
-
-#define ASM_STREAM_CMD_ENCDEC_EVENTS           0x0001321A
-
-#define AVS_PARAM_ID_RTIC_SHARED_MEMORY_ADDR   0x00013237
-
-struct avs_rtic_shared_mem_addr {
-	struct apr_hdr hdr;
-	struct asm_stream_cmd_set_encdec_param_v2  encdec;
-	u32                 shm_buf_addr_lsw;
-	/* Lower 32 bit of the RTIC shared memory */
-
-	u32                 shm_buf_addr_msw;
-	/* Upper 32 bit of the RTIC shared memory */
-
-	u32                 buf_size;
-	/* Size of buffer */
-
-	u16                 shm_buf_mem_pool_id;
-	/* ADSP_MEMORY_MAP_SHMEM8_4K_POOL */
-
-	u16                 shm_buf_num_regions;
-	/* number of regions to map */
-
-	u32                 shm_buf_flag;
-	/* buffer property flag */
-
-	struct avs_shared_map_region_payload map_region;
-	/* memory map region*/
-} __packed;
-
-#define AVS_PARAM_ID_RTIC_EVENT_ACK           0x00013238
-
-struct avs_param_rtic_event_ack {
-	struct apr_hdr hdr;
-	struct asm_stream_cmd_set_encdec_param_v2  encdec;
-} __packed;
 
 #define ASM_PARAM_ID_ENCDEC_BITRATE     0x00010C13
 
@@ -9903,6 +9828,18 @@ struct afe_svc_cmd_set_clip_bank_selection {
 #define AFE_PARAM_ID_GROUP_DEVICE_ENABLE 0x00010256
 #define AFE_GROUP_DEVICE_ID_SECONDARY_MI2S_RX	0x1102
 
+/* HTC_AUD_START */
+#define AFE_COPP_ID_ADAPTIVE_AUDIO_20            0x10000007 /* AS HS 2.0 */
+
+#define HTC_POPP_TOPOLOGY				0x10000002
+#define HTC_POPP_HD_TOPOLOGY				0x10000003
+struct asm_params {
+	struct apr_hdr	hdr;
+	struct asm_stream_cmd_set_pp_params_v2 param;
+	struct asm_stream_param_data_v2 data;
+} __packed;
+/* HTC_AUD_END */
+
 /*  Payload of the #AFE_PARAM_ID_GROUP_DEVICE_CFG
  * parameter, which configures max of 8 AFE ports
  * into a group.
@@ -10298,131 +10235,12 @@ struct asm_session_cmd_set_mtmx_strstr_params_v2 {
 	 */
 };
 
-/* Parameter used by #ASM_SESSION_MTMX_STRTR_MODULE_ID_AVSYNC which allows the
- * audio client choose the rendering decision that the audio DSP should use.
- */
-#define ASM_SESSION_MTMX_STRTR_PARAM_RENDER_MODE_CMD  0x00012F0D
-
-/* Indicates that rendering decision will be based on default rate
- * (session clock based rendering, device driven).
- * 1. The default session clock based rendering is inherently driven
- *    by the timing of the device.
- * 2. After the initial decision is made (first buffer after a run
- *    command), subsequent data rendering decisions are made with
- *    respect to the rate at which the device is rendering, thus deriving
- *    its timing from the device.
- * 3. While this decision making is simple, it has some inherent limitations
- *    (mentioned in the next section).
- * 4. If this API is not set, the session clock based rendering will be assumed
- *    and this will ensure that the DSP is backward compatible.
- */
-#define ASM_SESSION_MTMX_STRTR_PARAM_RENDER_DEFAULT 0
-
-/* Indicates that rendering decision will be based on local clock rate.
- * 1. In the DSP loopback/client loopback use cases (frame based
- *    inputs), the incoming data into audio DSP is time-stamped at the
- *    local clock rate (STC).
- * 2. This TS rate may match the incoming data rate or maybe different
- *    from the incoming data rate.
- * 3. Regardless, the data will be time-stamped with local STC and
- *    therefore, the client is recommended to set this mode for these
- *    use cases. This method is inherently more robust to sequencing
- *    (AFE Start/Stop) and device switches, among other benefits.
- * 4. This API will inform the DSP to compare every incoming buffer TS
- *    against local STC.
- * 5. DSP will continue to honor render windows APIs, as before.
- */
-#define ASM_SESSION_MTMX_STRTR_PARAM_RENDER_LOCAL_STC 1
-
-/* Structure for rendering decision parameter */
-struct asm_session_mtmx_strtr_param_render_mode_t {
-	/* Specifies the type of rendering decision the audio DSP should use.
-	 *
-	 * @values
-	 * - #ASM_SESSION_MTMX_STRTR_PARAM_RENDER_DEFAULT
-	 * - #ASM_SESSION_MTMX_STRTR_PARAM_RENDER_LOCAL_STC
-	 */
-	u32                  flags;
-} __packed;
-
-/* Parameter used by #ASM_SESSION_MTMX_STRTR_MODULE_ID_AVSYNC which allows the
- * audio client to specify the clock recovery mechanism that the audio DSP
- * should use.
- */
-
-#define ASM_SESSION_MTMX_STRTR_PARAM_CLK_REC_CMD 0x00012F0E
-
-/* Indicates that default clock recovery will be used (no clock recovery).
- * If the client wishes that no clock recovery be done, the client can
- * choose this. This means that no attempt will made by the DSP to try and
- * match the rates of the input and output audio.
- */
-#define ASM_SESSION_MTMX_STRTR_PARAM_CLK_REC_NONE 0
-
-/* Indicates that independent clock recovery needs to be used.
- * 1. In the DSP loopback/client loopback use cases (frame based inputs),
- *    the client should choose the independent clock recovery option.
- * 2. This basically de-couples the audio and video from knowing each others
- *    clock sources and lets the audio DSP independently rate match the input
- *    and output rates.
- * 3. After drift detection, the drift correction is achieved by either pulling
- *    the PLLs (if applicable) or by stream to device rate matching
- *    (for PCM use cases) by comparing drift with respect to STC.
- * 4. For passthrough use cases, since the PLL pulling is the only option,
- *    a best effort will be made.
- *    If PLL pulling is not possible / available, the rendering will be
- *    done without rate matching.
- */
-#define ASM_SESSION_MTMX_STRTR_PARAM_CLK_REC_AUTO 1
-
-/* Payload of the #ASM_SESSION_MTMX_STRTR_PARAM_CLK_REC parameter.
- */
-struct asm_session_mtmx_strtr_param_clk_rec_t {
-	/* Specifies the type of clock recovery that the audio DSP should
-	 * use for rate matching.
-	 */
-
-	/* @values
-	 * #ASM_SESSION_MTMX_STRTR_PARAM_CLK_REC_DEFAULT
-	 * #ASM_SESSION_MTMX_STRTR_PARAM_CLK_REC_INDEPENDENT
-	 */
-	u32                  flags;
-} __packed;
-
-
-/* Parameter used by #ASM_SESSION_MTMX_STRTR_MODULE_ID_AVSYNC to
- * realize smoother adjustment of audio session clock for a specified session.
- * The desired audio session clock adjustment(in micro seconds) is specified
- * using the command #ASM_SESSION_CMD_ADJUST_SESSION_CLOCK_V2.
- * Delaying/Advancing the session clock would be implemented by inserting
- * interpolated/dropping audio samples in the playback path respectively.
- * Also, this parameter has to be configured before the Audio Session is put
- * to RUN state to avoid cold start latency/glitches in the playback.
- */
-
-#define ASM_SESSION_MTMX_PARAM_ADJUST_SESSION_TIME_CTL         0x00013217
-
-struct asm_session_mtmx_param_adjust_session_time_ctl_t {
-	/* Specifies whether the module is enabled or not
-	 * @values
-	 * 0 -- disabled
-	 * 1 -- enabled
-	 */
-	u32                 enable;
-};
-
-union asm_session_mtmx_strtr_param_config {
-	struct asm_session_mtmx_strtr_param_window_v2_t window_param;
-	struct asm_session_mtmx_strtr_param_render_mode_t render_param;
-	struct asm_session_mtmx_strtr_param_clk_rec_t clk_rec_param;
-	struct asm_session_mtmx_param_adjust_session_time_ctl_t adj_time_param;
-} __packed;
-
 struct asm_mtmx_strtr_params {
 	struct apr_hdr  hdr;
 	struct asm_session_cmd_set_mtmx_strstr_params_v2 param;
 	struct asm_stream_param_data_v2 data;
-	union asm_session_mtmx_strtr_param_config config;
+	u32 window_lsw;
+	u32 window_msw;
 } __packed;
 
 #define ASM_SESSION_CMD_GET_MTMX_STRTR_PARAMS_V2 0x00010DCF
