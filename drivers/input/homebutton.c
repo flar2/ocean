@@ -4,9 +4,9 @@
 #include <linux/input.h>
 #include <linux/slab.h>
 #include <linux/fb.h>
-#include <linux/vibtrig.h>
 
 #define VIB_STRENGTH	20
+extern void set_vibrate(int value); 
 static DEFINE_MUTEX(hb_lock);
 
 struct homebutton_data {
@@ -15,7 +15,6 @@ struct homebutton_data {
 	struct work_struct hb_input_work;
 	struct notifier_block notif;
 	struct kobject *homebutton_kobj;
-	struct vib_trigger *vib_trigger;
 	bool key_down;
 	bool scr_suspended;
 	bool enable;
@@ -30,7 +29,7 @@ static void hb_input_callback(struct work_struct *unused) {
 		return;
 
 	if (hb_data.key_down)
-		vib_trigger_event(hb_data.vib_trigger, hb_data.vib_strength);
+		set_vibrate(hb_data.vib_strength);
 
 	input_event(hb_data.hb_dev, EV_KEY, KEY_HOME, hb_data.key_down);
 	input_event(hb_data.hb_dev, EV_SYN, 0, 0);
@@ -238,8 +237,6 @@ static int __init hb_init(void)
 		rc = -EINVAL;
 		goto err_alloc_dev;
 	}
-
-	vib_trigger_register_simple("vibrator", &hb_data.vib_trigger);
 
 	hb_data.homebutton_kobj = kobject_create_and_add("homebutton", NULL) ;
 	if (hb_data.homebutton_kobj == NULL) {
