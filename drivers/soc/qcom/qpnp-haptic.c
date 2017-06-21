@@ -2281,6 +2281,8 @@ static int qpnp_hap_auto_mode_config(struct qpnp_hap *hap, int time_ms)
 	return 0;
 }
 
+extern void register_haptic(int value);
+
 /* enable interface from timed output class */
 static void qpnp_hap_td_enable(struct timed_output_dev *dev, int time_ms)
 {
@@ -2322,6 +2324,8 @@ static void qpnp_hap_td_enable(struct timed_output_dev *dev, int time_ms)
 	}
 
 	time_ms = (time_ms > hap->timeout_ms ? hap->timeout_ms : time_ms);
+
+	register_haptic(time_ms);
 
 	if (hap->vmax_mv == QPNP_HAP_VMAX_MIN_MV) {
 		spin_unlock(&hap->lock);
