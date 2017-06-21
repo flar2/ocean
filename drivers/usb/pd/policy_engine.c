@@ -3119,6 +3119,10 @@ static inline const char *src_current(enum power_supply_typec_mode typec_mode)
 	}
 }
 
+#if 1
+extern void register_charging(int on);
+#endif
+
 static int psy_changed(struct notifier_block *nb, unsigned long evt, void *ptr)
 {
 	struct usbpd *pd = container_of(nb, struct usbpd, psy_nb);
@@ -3205,6 +3209,9 @@ static int psy_changed(struct notifier_block *nb, unsigned long evt, void *ptr)
 			usbpd_dbg(&pd->dev, "Ignoring disconnect due to PR swap\n");
 			return 0;
 		}
+
+		register_charging(0);
+
 		pd->current_pr = PR_NONE;
 		break;
 
@@ -3214,6 +3221,8 @@ static int psy_changed(struct notifier_block *nb, unsigned long evt, void *ptr)
 	case POWER_SUPPLY_TYPEC_SOURCE_HIGH:
 		usbpd_info(&pd->dev, "Type-C Source (%s) connected\n",
 				src_current(typec_mode));
+
+		register_charging(1);
 
 		/* if waiting for SinkTxOk to start an AMS */
 		if (pd->spec_rev == USBPD_REV_30 &&
