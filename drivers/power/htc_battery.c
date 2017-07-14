@@ -1201,6 +1201,10 @@ static void adjust_store_level(int *store_level, int drop_raw, int drop_ui, int 
 	*store_level = store;
 }
 
+#if 1
+extern void register_charge_level(int level);
+#endif
+
 #define DISCHG_UPDATE_PERIOD_MS			(1000 * 60)
 #define ONE_PERCENT_LIMIT_PERIOD_MS		(1000 * (60 + 10))
 #define FIVE_PERCENT_LIMIT_PERIOD_MS	(1000 * (300 + 10))
@@ -1251,6 +1255,7 @@ static void batt_level_adjust(unsigned long time_since_last_update_ms)
 
 		return;
 	}
+
 
 	/* In discharging case, to store the very first difference
 	 * between UI and Raw level.
@@ -1592,6 +1597,10 @@ static void batt_level_adjust(unsigned long time_since_last_update_ms)
 	}
 	htc_batt_info.prev.level = htc_batt_info.rep.level;
 	htc_batt_info.prev.level_raw = htc_batt_info.rep.level_raw;
+
+#if 1
+	register_charge_level(htc_batt_info.rep.level);
+#endif
 
 	s_first = 0;
 }
