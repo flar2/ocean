@@ -207,6 +207,8 @@ static irqreturn_t ft5x06_ts_interrupt(int irq, void *data);
 #define PINCTRL_STATE_SUSPEND	"pmx_ts_suspend"
 #define PINCTRL_STATE_RELEASE	"pmx_ts_release"
 
+extern int in_pocket= 0;
+
 static irqreturn_t ft5x06_ts_interrupt(int irq, void *data);
 
 enum {
@@ -649,6 +651,7 @@ static DEVICE_ATTR(enable, 0664,
 
 static int ft5x06_entry_pocket(struct device *dev)
 {
+	in_pocket = 1;
 	return ft5x06_ts_stop(dev);
 }
 
@@ -656,6 +659,8 @@ static int ft5x06_leave_pocket(struct device *dev)
 {
 	struct ft5x06_ts_data *data = dev_get_drvdata(dev);
 	int err;
+
+	in_pocket = 0;
 
 	ft5x06_ts_start(dev);
 	ft5x0x_write_reg(data->client, FT_REG_GESTURE_ENABLE, 1);
