@@ -327,3 +327,8 @@ config HTC_PNPMGR
 	  depends on PM
 	  ---help---
 	  Collect the sysfs files nodes for pnpmgr usage.
+
+config	BOEFFLA_WL_BLOCKER
+		bool "Boeffla generic wakelock blocker driver"
+		depends on PM
+		default N
