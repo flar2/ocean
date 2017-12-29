@@ -2348,7 +2348,7 @@ static void qpnp_hap_td_enable(struct timed_output_dev *dev, int time_ms)
 
 		register_haptic(time_ms);
 
-		if (hap->vmax_mv == QPNP_HAP_VMAX_MIN_MV) {
+		if (hap->vmax_mv == 1200) {
 			spin_unlock(&hap->lock);
 			return;
 		}
