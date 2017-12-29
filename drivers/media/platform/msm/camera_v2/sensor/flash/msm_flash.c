@@ -1,4 +1,4 @@
-/* Copyright (c) 2009-2016, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2009-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -161,6 +161,12 @@ static int32_t msm_flash_i2c_write_table(
 	conf_array.delay = settings->delay;
 	conf_array.reg_setting = settings->reg_setting_a;
 	conf_array.size = settings->size;
+
+	/* Validate the settings size */
+	if ((!conf_array.size) || (conf_array.size > MAX_I2C_REG_SET)) {
+		pr_err("failed: invalid size %d", conf_array.size);
+		return -EINVAL;
+	}
 
 	return flash_ctrl->flash_i2c_client.i2c_func_tbl->i2c_write_table(
 		&flash_ctrl->flash_i2c_client, &conf_array);
@@ -553,18 +559,42 @@ static int32_t msm_flash_init(
 	return 0;
 }
 
+static int32_t msm_flash_init_prepare(
+	struct msm_flash_ctrl_t *flash_ctrl,
+	struct msm_flash_cfg_data_t *flash_data)
+{
 #ifdef CONFIG_COMPAT
-static int32_t msm_flash_init_prepare(
-	struct msm_flash_ctrl_t *flash_ctrl,
-	struct msm_flash_cfg_data_t *flash_data)
-{
+	struct msm_flash_cfg_data_t flash_data_k;
+	struct msm_flash_init_info_t flash_init_info;
+	int32_t i = 0;
+
+	if (!is_compat_task()) {
+		/*for 64-bit usecase,it need copy the data to local memory*/
+		flash_data_k.cfg_type = flash_data->cfg_type;
+		for (i = 0; i < MAX_LED_TRIGGERS; i++) {
+			flash_data_k.flash_current[i] =
+				flash_data->flash_current[i];
+			flash_data_k.flash_duration[i] =
+				flash_data->flash_duration[i];
+		}
+
+		flash_data_k.cfg.flash_init_info = &flash_init_info;
+		if (copy_from_user(&flash_init_info,
+			(void __user *)(flash_data->cfg.flash_init_info),
+			sizeof(struct msm_flash_init_info_t))) {
+			pr_err("%s copy_from_user failed %d\n",
+				__func__, __LINE__);
+			return -EFAULT;
+		}
+		return msm_flash_init(flash_ctrl, &flash_data_k);
+	}
+	/*
+	 * for 32-bit usecase,it already copy the userspace
+	 * data to local memory in msm_flash_subdev_do_ioctl()
+	 * so here do not need copy from user
+	 */
 	return msm_flash_init(flash_ctrl, flash_data);
-}
 #else
-static int32_t msm_flash_init_prepare(
-	struct msm_flash_ctrl_t *flash_ctrl,
-	struct msm_flash_cfg_data_t *flash_data)
-{
 	struct msm_flash_cfg_data_t flash_data_k;
 	struct msm_flash_init_info_t flash_init_info;
 	int32_t i = 0;
@@ -579,15 +609,15 @@ static int32_t msm_flash_init_prepare(
 
 	flash_data_k.cfg.flash_init_info = &flash_init_info;
 	if (copy_from_user(&flash_init_info,
-		(void *)(flash_data->cfg.flash_init_info),
+		(void __user *)(flash_data->cfg.flash_init_info),
 		sizeof(struct msm_flash_init_info_t))) {
 		pr_err("%s copy_from_user failed %d\n",
 			__func__, __LINE__);
 		return -EFAULT;
 	}
 	return msm_flash_init(flash_ctrl, &flash_data_k);
-}
 #endif
+}
 
 static int32_t msm_flash_prepare(
 	struct msm_flash_ctrl_t *flash_ctrl)
@@ -655,14 +685,15 @@ static int32_t msm_flash_low(
 	{
 		if (flash_ctrl->pdev->id == 0)
 		{
-			//if(flash_data->flash_current[0] == -1 && flash_data->flash_current[1] == -1)
-                        if(flash_data->flash_current[0] == 300 && flash_data->flash_current[1] == 300)
-                        {
-                                htc_torch_main(300, 300);
-                                pr_info("[CAM][FL] Main msm_flash_low, Set current value (300, 300)\n");
-                        } else {
-                                htc_torch_main(150, 150);
-                                pr_info("[CAM][FL] Main msm_flash_low, Set current value (150, 150)\n");
+			if(flash_data->flash_current[0] == -1 && flash_data->flash_current[1] == -1)
+			{
+				pr_info("[CAM][FL] Main msm_flash_low, Set current value (150, 150)\n");
+				htc_torch_main(150, 150);
+			}
+			else
+			{
+				pr_info("[CAM][FL] Main msm_flash_low, Set torch value (%d, %d)\n", flash_data->flash_current[0], flash_data->flash_current[1]);
+				htc_torch_main(flash_data->flash_current[0], flash_data->flash_current[1]);
 			}
 		}
 	}
@@ -673,7 +704,10 @@ static int32_t msm_flash_low(
 	if(htc_flash_front && htc_torch_front)
 	{
 		if (flash_ctrl->pdev->id == 1)
+		{
+			pr_err("[CAM][FL] Front msm_flash_low, flashlight current is (50, 50)\n");
 			htc_torch_front(50,50);
+		}
 	}
 	else
 		pr_err("[CAM][FL] Front msm_flash_low, flashlight control is NULL\n");
@@ -1305,13 +1339,13 @@ static long msm_flash_subdev_do_ioctl(
 	sd = vdev_to_v4l2_subdev(vdev);
 	u32 = (struct msm_flash_cfg_data_t32 *)arg;
 
-	flash_data.cfg_type = u32->cfg_type;
-	for (i = 0; i < MAX_LED_TRIGGERS; i++) {
-		flash_data.flash_current[i] = u32->flash_current[i];
-		flash_data.flash_duration[i] = u32->flash_duration[i];
-	}
 	switch (cmd) {
 	case VIDIOC_MSM_FLASH_CFG32:
+		flash_data.cfg_type = u32->cfg_type;
+		for (i = 0; i < MAX_LED_TRIGGERS; i++) {
+			flash_data.flash_current[i] = u32->flash_current[i];
+			flash_data.flash_duration[i] = u32->flash_duration[i];
+		}
 		cmd = VIDIOC_MSM_FLASH_CFG;
 		switch (flash_data.cfg_type) {
 		case CFG_FLASH_OFF:

@@ -28,48 +28,13 @@
 #include <linux/platform_device.h>
 #include <linux/of.h>
 #include <trace/events/power.h>
+#include <linux/htc_lmh_debug.h>
 
 #if defined(CONFIG_HTC_DEBUG_FOOTPRINT)
 #include <htc_mnemosyne/htc_footprint.h>
 #endif
 
 static DEFINE_MUTEX(l2bw_lock);
-
-
-static unsigned long arg_cpu_max_c1 = 1900800;
-
-static int __init cpufreq_read_cpu_max_c1(char *cpu_max_c1)
-{
-	unsigned long ui_khz;
-	int ret;
-
-	ret = kstrtoul(cpu_max_c1, 0, &ui_khz);
-	if (ret)
-		return -EINVAL;
-
-	arg_cpu_max_c1 = ui_khz;
-	printk("cpu_max_c1=%lu\n", arg_cpu_max_c1);
-	return ret;
-}
-__setup("cpu_max_c1=", cpufreq_read_cpu_max_c1);
-
-static unsigned long arg_cpu_max_c2 = 2457600;
-
-static int __init cpufreq_read_cpu_max_c2(char *cpu_max_c2)
-{
-	unsigned long ui_khz;
-	int ret;
-
-	ret = kstrtoul(cpu_max_c2, 0, &ui_khz);
-	if (ret)
-		return -EINVAL;
-
-	arg_cpu_max_c2 = ui_khz;
-	printk("cpu_max_c2=%lu\n", arg_cpu_max_c2);
-	return ret;
-}
-__setup("cpu_max_c2=", cpufreq_read_cpu_max_c2);
-
 
 static struct clk *cpu_clk[NR_CPUS];
 static struct clk *l2_clk;
@@ -178,6 +143,7 @@ static unsigned int msm_cpufreq_get_freq(unsigned int cpu)
 	return clk_get_rate(cpu_clk[cpu]) / 1000;
 }
 
+struct cpu_freq_table cpu_freq_table_info;
 static int msm_cpufreq_init(struct cpufreq_policy *policy)
 {
 	int cur_freq;
@@ -185,7 +151,8 @@ static int msm_cpufreq_init(struct cpufreq_policy *policy)
 	int ret = 0;
 	struct cpufreq_frequency_table *table =
 			per_cpu(freq_table, policy->cpu);
-	int cpu;
+	struct cpufreq_frequency_table *pos;
+	int cpu, freq_steps_num = 0;
 
 	/*
 	 * In some SoC, some cores are clocked by same source, and their
@@ -193,6 +160,18 @@ static int msm_cpufreq_init(struct cpufreq_policy *policy)
 	 * CPUs that share same clock, and mark them as controlled by
 	 * same policy.
 	 */
+	cpufreq_for_each_valid_entry(pos, table) {
+		cpu_freq_table_info.cpu_freq_table[policy->cpu][freq_steps_num] = pos->frequency;
+		freq_steps_num++;
+	}
+	cpu_freq_table_info.cpu_freq_steps_num[policy->cpu] = freq_steps_num;
+	cpu_freq_table_info.max_cpu_freq[policy->cpu] = cpu_freq_table_info.cpu_freq_table[policy->cpu][freq_steps_num-1];
+	pr_info("%s: CPU%d: cpufreq steps number:%d, Max cpufreq:%d\n",
+					__func__,
+					policy->cpu,
+					cpu_freq_table_info.cpu_freq_steps_num[policy->cpu],
+					cpu_freq_table_info.max_cpu_freq[policy->cpu]);
+
 	for_each_possible_cpu(cpu)
 		if (cpu_clk[cpu] == cpu_clk[policy->cpu])
 			cpumask_set_cpu(cpu, policy->cpus);
@@ -429,13 +408,6 @@ static struct cpufreq_frequency_table *cpufreq_parse_dt(struct device *dev,
 		 */
 		if (j > 0 && f <= ftbl[j - 1].frequency)
 			continue;
-
-		//Custom max freq
-		if ((cpu < 4 && f > arg_cpu_max_c1) ||
-				(cpu >= 4 && f > arg_cpu_max_c2)) {
-			nf = j;
-			break;
-		}
 
 		ftbl[j].driver_data = j;
 		ftbl[j].frequency = f;

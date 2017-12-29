@@ -26,6 +26,7 @@
 #include <linux/mm.h>
 #include <linux/dma-attrs.h>
 #include <linux/uaccess.h>
+#include <linux/kthread.h>
 #include <asm/cacheflush.h>
 
 /*
@@ -47,7 +48,6 @@
 #define kgsl_drawobj_profiling_buffer kgsl_cmdbatch_profiling_buffer
 
 #include "kgsl_htc.h"
-#include <linux/kthread.h>
 
 /* The number of memstore arrays limits the number of contexts allowed.
  * If more contexts are needed, update multiple for MEMSTORE_SIZE
@@ -154,10 +154,9 @@ struct kgsl_driver {
 	unsigned int full_cache_threshold;
 	struct workqueue_struct *workqueue;
 	struct workqueue_struct *mem_workqueue;
-	struct kgsl_driver_htc_priv priv;
-
 	struct kthread_worker worker;
 	struct task_struct *worker_thread;
+	struct kgsl_driver_htc_priv priv;
 };
 
 extern struct kgsl_driver kgsl_driver;
