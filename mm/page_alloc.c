@@ -72,6 +72,10 @@
 static DEFINE_MUTEX(pcp_batch_high_lock);
 #define MIN_PERCPU_PAGELIST_FRACTION	(8)
 
+#ifdef CONFIG_MIGRATE_HIGHORDER
+#define is_migrate_highorder(migratetype) unlikely((migratetype) == MIGRATE_HIGHORDER)
+#endif
+
 #ifdef CONFIG_USE_PERCPU_NUMA_NODE_ID
 DEFINE_PER_CPU(int, numa_node);
 EXPORT_PER_CPU_SYMBOL(numa_node);
@@ -252,6 +256,9 @@ compound_page_dtor * const compound_page_dtors[] = {
  */
 int min_free_kbytes = 1024;
 int user_min_free_kbytes = -1;
+#ifdef CONFIG_HSWAP
+int wmark_tune_level = 6;
+#endif
 
 /*
  * Extra memory for the system to try freeing. Used to temporarily
@@ -286,28 +293,37 @@ EXPORT_SYMBOL(nr_online_nodes);
 int page_group_by_mobility_disabled __read_mostly;
 
 #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT
+
+/*
+ * Determine how many pages need to be initialized durig early boot
+ * (non-deferred initialization).
+ * The value of first_deferred_pfn will be set later, once non-deferred pages
+ * are initialized, but for now set it ULONG_MAX.
+ */
 static inline void reset_deferred_meminit(pg_data_t *pgdat)
 {
-	unsigned long max_initialise;
-	unsigned long reserved_lowmem;
+	phys_addr_t start_addr, end_addr;
+	unsigned long max_pgcnt;
+	unsigned long reserved;
 
 	/*
 	 * Initialise at least 2G of a node but also take into account that
 	 * two large system hashes that can take up 1GB for 0.25TB/node.
 	 */
-	max_initialise = max(2UL << (30 - PAGE_SHIFT),
-		(pgdat->node_spanned_pages >> 8));
+	max_pgcnt = max(2UL << (30 - PAGE_SHIFT),
+			(pgdat->node_spanned_pages >> 8));
 
 	/*
 	 * Compensate the all the memblock reservations (e.g. crash kernel)
 	 * from the initial estimation to make sure we will initialize enough
 	 * memory to boot.
 	 */
-	reserved_lowmem = memblock_reserved_memory_within(pgdat->node_start_pfn,
-			pgdat->node_start_pfn + max_initialise);
-	max_initialise += reserved_lowmem;
+	start_addr = PFN_PHYS(pgdat->node_start_pfn);
+	end_addr = PFN_PHYS(pgdat->node_start_pfn + max_pgcnt);
+	reserved = memblock_reserved_memory_within(start_addr, end_addr);
+	max_pgcnt += PHYS_PFN(reserved);
 
-	pgdat->static_init_size = min(max_initialise, pgdat->node_spanned_pages);
+	pgdat->static_init_pgcnt = min(max_pgcnt, pgdat->node_spanned_pages);
 	pgdat->first_deferred_pfn = ULONG_MAX;
 }
 
@@ -343,7 +359,7 @@ static inline bool update_defer_init(pg_data_t *pgdat,
 		return true;
 	/* Initialise at least 2G of the highest zone */
 	(*nr_initialised)++;
-	if ((*nr_initialised > pgdat->static_init_size) &&
+	if ((*nr_initialised > pgdat->static_init_pgcnt) &&
 	    (pfn & (PAGES_PER_SECTION - 1)) == 0) {
 		pgdat->first_deferred_pfn = pfn;
 		return false;
@@ -1329,6 +1345,7 @@ bool is_cma_pageblock(struct page *page)
 {
 	return get_pageblock_migratetype(page) == MIGRATE_CMA;
 }
+
 EXPORT_SYMBOL(is_cma_pageblock);
 
 /* Free whole pageblock and set its migration type to MIGRATE_CMA. */
@@ -1536,6 +1553,9 @@ static int fallbacks[MIGRATE_TYPES][4] = {
 #endif
 #ifdef CONFIG_MEMORY_ISOLATION
 	[MIGRATE_ISOLATE]     = { MIGRATE_TYPES }, /* Never used */
+#endif
+#ifdef CONFIG_MIGRATE_HIGHORDER
+	[MIGRATE_HIGHORDER]   = { MIGRATE_TYPES },
 #endif
 };
 
@@ -1900,10 +1920,24 @@ static struct page *__rmqueue(struct zone *zone, unsigned int order,
 	struct page *page;
 
 	page = __rmqueue_smallest(zone, order, migratetype);
+
+#ifdef CONFIG_MIGRATE_HIGHORDER
+	if (unlikely(!page) && migratetype == MIGRATE_HIGHORDER) {
+		goto end_rmqueue;
+	}
+#endif
+
 	if (unlikely(!page)) {
-		page = __rmqueue_fallback(zone, order, migratetype);
+		if (migratetype == MIGRATE_MOVABLE)
+			page = __rmqueue_cma_fallback(zone, order);
+
+		if (!page)
+			page = __rmqueue_fallback(zone, order, migratetype);
 	}
 
+#ifdef CONFIG_MIGRATE_HIGHORDER
+end_rmqueue:
+#endif
 	trace_mm_page_alloc_zone_locked(page, order, migratetype);
 	return page;
 }
@@ -1969,6 +2003,12 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 		if (is_migrate_cma(get_pcppage_migratetype(page)))
 			__mod_zone_page_state(zone, NR_FREE_CMA_PAGES,
 					      -(1 << order));
+
+#ifdef CONFIG_MIGRATE_HIGHORDER
+		if (is_migrate_highorder(get_pcppage_migratetype(page)))
+			__mod_zone_page_state(zone, NR_FREE_HIGHORDER_PAGES,
+							-(1 << order));
+#endif
 	}
 	__mod_zone_page_state(zone, NR_FREE_PAGES, -(i << order));
 	spin_unlock(&zone->lock);
@@ -2197,7 +2237,11 @@ void free_hot_cold_page(struct page *page, bool cold)
 	 * excessively into the page allocator
 	 */
 	if (migratetype >= MIGRATE_PCPTYPES) {
-		if (unlikely(is_migrate_isolate(migratetype))) {
+		if (unlikely(is_migrate_isolate(migratetype))
+#ifdef CONFIG_MIGRATE_HIGHORDER
+				|| is_migrate_highorder(migratetype)
+#endif
+		   ) {
 			free_one_page(zone, page, pfn, 0, migratetype);
 			goto out;
 		}
@@ -2295,7 +2339,11 @@ int __isolate_free_page(struct page *page, unsigned int order)
 		for (; page < endpage; page += pageblock_nr_pages) {
 			int mt = get_pageblock_migratetype(page);
 			if (!is_migrate_isolate(mt) && !is_migrate_cma(mt)
-				&& mt != MIGRATE_HIGHATOMIC)
+				&& mt != MIGRATE_HIGHATOMIC
+#ifdef CONFIG_MIGRATE_HIGHORDER
+				&& !is_migrate_highorder(mt)
+#endif
+			   )
 				set_pageblock_migratetype(page,
 							  MIGRATE_MOVABLE);
 		}
@@ -2516,6 +2564,10 @@ static bool __zone_watermark_ok(struct zone *z, unsigned int order,
 	if (!(alloc_flags & ALLOC_CMA))
 		free_pages -= zone_page_state(z, NR_FREE_CMA_PAGES);
 #endif
+#ifdef CONFIG_MIGRATE_HIGHORDER
+	if (!(alloc_flags & ALLOC_HIGHORDER))
+		free_pages -= zone_page_state(z, NR_FREE_HIGHORDER_PAGES);
+#endif
 
 	/*
 	 * Check watermarks for an order-0 allocation request. If these
@@ -2537,9 +2589,6 @@ static bool __zone_watermark_ok(struct zone *z, unsigned int order,
 		if (!area->nr_free)
 			continue;
 
-		if (alloc_harder)
-			return true;
-
 		for (mt = 0; mt < MIGRATE_PCPTYPES; mt++) {
 #ifdef CONFIG_CMA
 			/*
@@ -2559,6 +2608,9 @@ static bool __zone_watermark_ok(struct zone *z, unsigned int order,
 			return true;
 		}
 #endif
+		if (alloc_harder &&
+			!list_empty(&area->free_list[MIGRATE_HIGHATOMIC]))
+			return true;
 	}
 	return false;
 }
@@ -3348,6 +3400,12 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order,
 	if (IS_ENABLED(CONFIG_CMA) && ac.migratetype == MIGRATE_MOVABLE)
 		alloc_flags |= ALLOC_CMA;
 
+#ifdef CONFIG_MIGRATE_HIGHORDER
+	if (gfp_mask & __GFP_HIGHORDER) {
+		ac.migratetype = MIGRATE_HIGHORDER;
+		alloc_flags |= ALLOC_HIGHORDER;
+	}
+#endif
 retry_cpuset:
 	cpuset_mems_cookie = read_mems_allowed_begin();
 
@@ -3368,6 +3426,10 @@ retry_cpuset:
 	/* First allocation attempt */
 	alloc_mask = gfp_mask|__GFP_HARDWALL;
 	page = get_page_from_freelist(alloc_mask, order, alloc_flags, &ac);
+#ifdef CONFIG_MIGRATE_HIGHORDER
+    if (!page && ac.migratetype == MIGRATE_HIGHORDER)
+		return page;
+#endif
 	if (unlikely(!page)) {
 		/*
 		 * Runtime PM, block IO and its error handling path
@@ -3801,6 +3863,9 @@ static void show_migration_types(unsigned char type)
 #ifdef CONFIG_MEMORY_ISOLATION
 		[MIGRATE_ISOLATE]	= 'I',
 #endif
+#ifdef CONFIG_MIGRATE_HIGHORDER
+		[MIGRATE_HIGHORDER] = 'H',
+#endif
 	};
 	char tmp[MIGRATE_TYPES + 1];
 	char *p = tmp;
@@ -3843,7 +3908,11 @@ void show_free_areas(unsigned int filter)
 		" unevictable:%lu dirty:%lu writeback:%lu unstable:%lu\n"
 		" slab_reclaimable:%lu slab_unreclaimable:%lu\n"
 		" mapped:%lu shmem:%lu pagetables:%lu bounce:%lu\n"
-		" free:%lu free_pcp:%lu free_cma:%lu\n",
+		" free:%lu free_pcp:%lu free_cma:%lu\n"
+#ifdef CONFIG_MIGRATE_HIGHORDER
+		"free_highorder:%lu\n"
+#endif
+		,
 		global_page_state(NR_ACTIVE_ANON),
 		global_page_state(NR_INACTIVE_ANON),
 		global_page_state(NR_ISOLATED_ANON),
@@ -3862,7 +3931,11 @@ void show_free_areas(unsigned int filter)
 		global_page_state(NR_BOUNCE),
 		global_page_state(NR_FREE_PAGES),
 		free_pcp,
-		global_page_state(NR_FREE_CMA_PAGES));
+		global_page_state(NR_FREE_CMA_PAGES)
+#ifdef CONFIG_MIGRATE_HIGHORDER
+		,global_page_state(NR_FREE_HIGHORDER_PAGES)
+#endif
+		);
 
 	for_each_populated_zone(zone) {
 		int i;
@@ -3903,6 +3976,9 @@ void show_free_areas(unsigned int filter)
 			" free_pcp:%lukB"
 			" local_pcp:%ukB"
 			" free_cma:%lukB"
+#ifdef CONFIG_MIGRATE_HIGHORDER
+			" free_highorder:%lukB"
+#endif
 			" writeback_tmp:%lukB"
 			" pages_scanned:%lu"
 			" all_unreclaimable? %s"
@@ -3936,6 +4012,9 @@ void show_free_areas(unsigned int filter)
 			K(free_pcp),
 			K(this_cpu_read(zone->pageset->pcp.count)),
 			K(zone_page_state(zone, NR_FREE_CMA_PAGES)),
+#ifdef CONFIG_MIGRATE_HIGHORDER
+			K(zone_page_state(zone, NR_FREE_HIGHORDER_PAGES)),
+#endif
 			K(zone_page_state(zone, NR_WRITEBACK_TEMP)),
 			K(zone_page_state(zone, NR_PAGES_SCANNED)),
 			(!zone_reclaimable(zone) ? "yes" : "no")
@@ -4604,6 +4683,75 @@ static inline unsigned long wait_table_bits(unsigned long size)
 {
 	return ffz(~size);
 }
+
+#ifdef CONFIG_MIGRATE_HIGHORDER
+static void setup_zone_migrate_highorder(struct zone *zone)
+{
+	unsigned long start_pfn, pfn, end_pfn;
+	struct page *page;
+	unsigned long block_migratetype;
+	int reserve;
+	unsigned long highorder_pages = 0;
+
+	/*
+	 * Get the start pfn, end pfn and the number of blocks to reserve
+	 * We have to be careful to be aligned to pageblock_nr_pages to
+	 * make sure that we always check pfn_valid for the first page in
+	 * the block.
+	 */
+	start_pfn = zone->zone_start_pfn;
+	end_pfn = zone_end_pfn(zone);
+	start_pfn = roundup(start_pfn, pageblock_nr_pages);
+#ifdef CONFIG_HIGHORDER_PAGES
+	highorder_pages = CONFIG_HIGHORDER_PAGES;
+#endif
+	/* Default if 0, set 10% of total memory */
+	if (highorder_pages == 0)
+		highorder_pages = zone->present_pages / 10;
+	reserve = roundup(highorder_pages, pageblock_nr_pages)
+			>> pageblock_order;
+
+	start_pfn = end_pfn - ((end_pfn - start_pfn) /2);
+
+	for (pfn = start_pfn; pfn < end_pfn; pfn += pageblock_nr_pages) {
+		if (!pfn_valid(pfn))
+			continue;
+		page = pfn_to_page(pfn);
+
+		/* Watch out for overlapping nodes */
+		if (page_to_nid(page) != zone_to_nid(zone))
+			continue;
+
+		block_migratetype = get_pageblock_migratetype(page);
+
+		/* Only test what is necessary when the reserves are not met */
+		if (reserve > 0) {
+			/* If this block is reserved, account for it */
+			if (block_migratetype == MIGRATE_HIGHORDER) {
+				reserve--;
+				continue;
+			}
+
+			/* Suitable for reserving if this block is movable */
+			if (block_migratetype == MIGRATE_MOVABLE) {
+				set_pageblock_migratetype(page, MIGRATE_HIGHORDER);
+				move_freepages_block(zone, page, MIGRATE_HIGHORDER);
+				reserve--;
+				continue;
+			}
+		}
+
+		/*
+		 * If the reserve is met and this is a previous reserved block,
+		 * take it back
+		 */
+		if (block_migratetype == MIGRATE_HIGHORDER) {
+			set_pageblock_migratetype(page, MIGRATE_MOVABLE);
+			move_freepages_block(zone, page, MIGRATE_MOVABLE);
+		}
+	}
+}
+#endif
 
 /*
  * Initially all pages are reserved - free ones are freed
@@ -5410,6 +5558,19 @@ static void __paginginit free_area_init_core(struct pglist_data *pgdat)
 		BUG_ON(ret);
 		memmap_init(size, nid, j, zone_start_pfn);
 		zone_start_pfn += size;
+#ifdef CONFIG_MIGRATE_HIGHORDER
+#ifdef CONFIG_32BIT
+		if (is_highmem(zone))
+#else /* CONFIG_64BIT */
+#ifdef CONFIG_ZONE_DMA
+		if (zone_idx(zone) == ZONE_DMA)
+#else
+		if (zone_idx(zone) == ZONE_NORMAL)
+#endif
+#endif
+			setup_zone_migrate_highorder(zone);
+#endif
+
 	}
 }
 
@@ -5954,8 +6115,8 @@ unsigned long free_reserved_area(void *start, void *end, int poison, char *s)
 	}
 
 	if (pages && s)
-		pr_info("Freeing %s memory: %ldK (%p - %p)\n",
-			s, pages << (PAGE_SHIFT - 10), start, end);
+		pr_info("Freeing %s memory: %ldK\n",
+			s, pages << (PAGE_SHIFT - 10));
 
 	return pages;
 }
@@ -6171,7 +6332,6 @@ static void __setup_per_zone_wmarks(void)
 
 	for_each_zone(zone) {
 		u64 min, low;
-
 		spin_lock_irqsave(&zone->lock, flags);
 		min = (u64)pages_min * zone->managed_pages;
 		do_div(min, lowmem_pages);
@@ -6201,11 +6361,28 @@ static void __setup_per_zone_wmarks(void)
 			zone->watermark[WMARK_MIN] = min;
 		}
 
+
+#ifdef CONFIG_HSWAP
+		if (!is_highmem(zone)) {
+			zone->watermark[WMARK_HIGH] = min_wmark_pages(zone) +
+				low + min * wmark_tune_level;
+			zone->watermark[WMARK_LOW] = high_wmark_pages(zone) -
+				(min * 1 / 4);
+#ifdef CONFIG_ZRAM
+			zone->watermark[WMARK_MIN] >>= 1;
+#endif
+		} else {
+			zone->watermark[WMARK_LOW]  = min_wmark_pages(zone) +
+						low + (min >> 2);
+			zone->watermark[WMARK_HIGH] = min_wmark_pages(zone) +
+						low + (min >> 1);
+		}
+#else
 		zone->watermark[WMARK_LOW]  = min_wmark_pages(zone) +
 					low + (min >> 2);
 		zone->watermark[WMARK_HIGH] = min_wmark_pages(zone) +
 					low + (min >> 1);
-
+#endif
 		__mod_zone_page_state(zone, NR_ALLOC_BATCH,
 			high_wmark_pages(zone) - low_wmark_pages(zone) -
 			atomic_long_read(&zone->vm_stat[NR_ALLOC_BATCH]));
@@ -6274,22 +6451,6 @@ static void __meminit setup_per_zone_inactive_ratio(void)
 		calculate_zone_inactive_ratio(zone);
 }
 
-int vm_inactive_ratio = 0;
-int vm_inactive_ratio_handler(struct ctl_table *table, int write,
-	void __user *buffer, size_t *length, loff_t *ppos)
-{
-	struct zone *zone;
-	int old_ratio = vm_inactive_ratio;
-	int ret;
-
-	ret = proc_dointvec_minmax(table, write, buffer, length, ppos);
-	if (ret == 0 && write && vm_inactive_ratio != old_ratio) {
-		for_each_zone(zone){
-			zone->inactive_ratio = vm_inactive_ratio;
-		}
-	}
-	return ret;
-}
 /*
  * Initialise min_free_kbytes.
  *
@@ -6360,6 +6521,21 @@ int min_free_kbytes_sysctl_handler(struct ctl_table *table, int write,
 	}
 	return 0;
 }
+
+#ifdef CONFIG_HSWAP
+int wmark_tune_level_sysctl_handler(struct ctl_table *table, int write,
+		void __user *buffer, size_t *length, loff_t *ppos)
+{
+	int ret;
+
+	ret = proc_dointvec_minmax(table, write, buffer, length, ppos);
+	if (ret < 0 || !write)
+		return ret;
+
+	setup_per_zone_wmarks();
+	return ret;
+}
+#endif
 
 #ifdef CONFIG_NUMA
 int sysctl_min_unmapped_ratio_sysctl_handler(struct ctl_table *table, int write,
@@ -6927,7 +7103,7 @@ int alloc_contig_range(unsigned long start, unsigned long end,
 
 	/* Make sure the range is really isolated. */
 	if (test_pages_isolated(outer_start, end, false)) {
-		pr_info("%s: [%lx, %lx) PFNs busy\n",
+		pr_info_ratelimited("%s: [%lx, %lx) PFNs busy\n",
 			__func__, outer_start, end);
 		ret = -EBUSY;
 		goto done;
