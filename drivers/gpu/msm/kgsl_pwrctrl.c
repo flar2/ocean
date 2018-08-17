@@ -323,6 +323,11 @@ static void kgsl_pwrctrl_set_thermal_cycle(struct kgsl_pwrctrl *pwr,
  * default value.  Do not change the bus if a constraint keeps the new
  * level at the current level.  Set the new GPU frequency.
  */
+#ifdef 
+int gpu_power_level;
+int gpu_max_power_level;
+unsigned int gpu_busy_load;
+#endif
 void kgsl_pwrctrl_pwrlevel_change(struct kgsl_device *device,
 				unsigned int new_level)
 {
@@ -386,6 +391,11 @@ void kgsl_pwrctrl_pwrlevel_change(struct kgsl_device *device,
 	 */
 	pwr->active_pwrlevel = new_level;
 	pwr->previous_pwrlevel = old_level;
+
+#ifdef 
+	gpu_power_level = pwr->pwrlevels[pwr->active_pwrlevel].gpu_freq;
+	gpu_max_power_level = pwr->pwrlevels[pwr->thermal_pwrlevel].gpu_freq;;
+#endif
 
 	/*
 	 * If the bus is running faster than its default level and the GPU
@@ -839,12 +849,19 @@ static ssize_t kgsl_pwrctrl_gpuclk_show(struct device *dev,
 				    struct device_attribute *attr,
 				    char *buf)
 {
+	unsigned long freq;
 	struct kgsl_device *device = kgsl_device_from_dev(dev);
 	struct kgsl_pwrctrl *pwr;
 	if (device == NULL)
 		return 0;
 	pwr = &device->pwrctrl;
-	return snprintf(buf, PAGE_SIZE, "%ld\n", kgsl_pwrctrl_active_freq(pwr));
+
+	if (device->state == KGSL_STATE_SLUMBER)
+		freq = pwr->pwrlevels[pwr->num_pwrlevels - 1].gpu_freq;
+	else
+		freq = kgsl_pwrctrl_active_freq(pwr);
+
+	return snprintf(buf, PAGE_SIZE, "%lu\n", freq);
 }
 
 static ssize_t __timer_store(struct device *dev, struct device_attribute *attr,
@@ -1624,6 +1641,8 @@ void kgsl_pwrctrl_busy_time(struct kgsl_device *device, u64 time, u64 busy)
 	stats->busy_old = stats->busy;
 	stats->total = 0;
 	stats->busy = 0;
+
+	gpu_busy_load = stats->busy_old * 100 / stats->total_old;
 
 	trace_kgsl_gpubusy(device, stats->busy_old, stats->total_old);
 }
