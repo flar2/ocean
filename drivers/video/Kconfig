@@ -59,11 +59,7 @@ config FB_MINIFB
 	---help---
 	  This is a `virtual' frame buffer device for some specific usage.
 
-config KLAPSE
-    bool
-    default n
-    help
-        A simple rgb dynamic lapsing module similar to LineageOS' livedisplay
+source "drivers/video/klapse/Kconfig"
 
 
 endmenu
